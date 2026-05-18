@@ -1,0 +1,119 @@
+##  Build
+cd hostap/hostapd
+make -j6
+ls -la hostapd hostapd_cli
+
+## Start Tmux
+tmux new-session -s cce
+# Split into 3 panes: Ctrl+b then " (twice)
+
+
+## Virtual Wi-Fi Setup (Pane 1)
+# Remove existing module
+sudo modprobe -r mac80211_hwsim 2>/dev/null
+sleep 1
+
+# Create 2 virtual radios
+# wlan0 = AP (hostapd)
+# wlan1 = monitor (tcpdump)
+sudo modprobe mac80211_hwsim radios=2
+sleep 1
+
+# Verify
+iw dev
+
+# Bring up wlan0
+sudo ip link set wlan0 up
+
+## Hostapd Config
+cat > /tmp/hostapd-dpp.conf << 'EOF'
+interface=wlan0
+driver=nl80211
+ssid=CCE-Test-AP
+hw_mode=g
+channel=6
+country_code=US
+
+# Control interface
+ctrl_interface=/var/run/hostapd
+ctrl_interface_group=0
+
+# Security
+wpa=2
+wpa_passphrase=testpassword1234
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+
+# PMF - required for DPP
+ieee80211w=1
+
+# DPP CCE - start disabled
+dpp_configurator_connectivity=0
+
+# Full debug logging
+logger_stdout=-1
+logger_stdout_level=0
+EOF
+
+## Run hostapd (Pane 1)
+sudo pkill hostapd 2>/dev/null
+sudo pkill wpa_supplicant 2>/dev/null
+sleep 1
+
+cd hostap/hostapd
+sudo ./hostapd -dd /tmp/hostapd-dpp.conf 2>&1 | tee /tmp/hostapd.log
+
+## Set up monitor + tcpdump (Pane 2)
+# Switch to pane 2: Ctrl+b then arrow key
+
+# Set wlan1 to monitor mode
+sudo ip link set wlan1 down
+sudo iw wlan1 set type monitor
+sudo ip link set wlan1 up
+
+# Verify
+iw wlan1 info | grep type
+
+# Start capture
+sudo tcpdump -i wlan1 -w /tmp/cce_capture.pcap 'type mgt' &
+
+## Send CCE via hostapd_cli (Pane 3)
+# Switch to pane 3: Ctrl+b then arrow key
+
+cd hostap/hostapd
+
+# Verify hostapd is running
+sudo ./hostapd_cli -i wlan0 ping
+# Expected: PONG
+
+# Check status
+sudo ./hostapd_cli -i wlan0 status
+
+# Check current CCE value (should be 0)
+sudo ./hostapd_cli -i wlan0 GET dpp_configurator_connectivity
+
+# Enable CCE - this triggers the indication
+sudo ./hostapd_cli -i wlan0 SET dpp_configurator_connectivity 1
+# Expected: OK
+
+# Force beacon update to broadcast CCE in beacon frames
+sudo ./hostapd_cli -i wlan0 UPDATE_BEACON
+
+# Verify
+sudo ./hostapd_cli -i wlan0 GET dpp_configurator_connectivity
+
+sleep 5
+
+# Disable CCE
+sudo ./hostapd_cli -i wlan0 SET dpp_configurator_connectivity 0
+sudo ./hostapd_cli -i wlan0 UPDATE_BEACON
+
+## Stop capture and verify
+# Stop tcpdump
+sudo pkill tcpdump
+
+# Check capture file has frames
+tcpdump -r /tmp/cce_capture.pcap | head -20
+
+# Check hostapd log for CCE
+grep -i "dpp\|cce\|beacon\|connectivity" /tmp/hostapd.log
