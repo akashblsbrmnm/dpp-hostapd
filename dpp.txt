@@ -117,3 +117,59 @@ tcpdump -r /tmp/cce_capture.pcap | head -20
 
 # Check hostapd log for CCE
 grep -i "dpp\|cce\|beacon\|connectivity" /tmp/hostapd.log
+
+
+---------
+Trigger CCE
+# Switch to Pane 3: Ctrl+b arrow key
+cd ~/akash/hostap/hostapd
+
+# Verify hostapd running
+sudo ./hostapd_cli -i wlan0 ping
+# Expected: PONG
+
+# Add configurator
+sudo ./hostapd_cli -i wlan0 dpp_configurator_add
+# Returns: 1
+
+# Generate bootstrap key (note space before mac=)
+sudo ./hostapd_cli -i wlan0 dpp_bootstrap_gen type=qrcode chan=81/6 mac=020000000000
+# Returns: 1
+
+# Verify bootstrap
+sudo ./hostapd_cli -i wlan0 dpp_bootstrap_info 1
+
+# Start DPP listen — THIS triggers CCE indication
+sudo ./hostapd_cli -i wlan0 dpp_listen 2437
+# Expected: OK
+
+sleep 10
+
+# Stop listen
+sudo ./hostapd_cli -i wlan0 dpp_stop_listen
+
+
+## Analyze capture (Pane 2)
+# Ctrl+C to stop tcpdump
+
+# Check frame count
+tcpdump -r /tmp/cce_capture.pcap | wc -l
+
+# See all frames
+tcpdump -r /tmp/cce_capture.pcap
+
+# Filter action frames only
+tcpdump -r /tmp/cce_capture.pcap 'type mgt subtype action'
+
+Check hostapd log:
+grep -i "dpp\|cce\|listen\|chirp" /tmp/hostapd.log
+
+## Cleanup
+sudo pkill hostapd 2>/dev/null
+sudo pkill tcpdump 2>/dev/null
+sudo ip link set mon0 down 2>/dev/null
+sudo iw dev mon0 del 2>/dev/null
+sudo modprobe -r mac80211_hwsim 2>/dev/null
+sudo rm -rf /var/run/hostapd/
+sudo rm -f /tmp/hostapd-dpp.conf /tmp/hostapd.log /tmp/cce_capture.pcap
+echo "=== Cleanup Done ==="
