@@ -1,0 +1,167 @@
+db h
+--------
+bool dpp_uri_parse(const std::string &dpp_uri);
+
+db.cpp
+--------
+bool db::dpp_uri_parse(const std::string &dpp_uri)
+{
+    const std::string prefix = "DPP:";
+    if (dpp_uri.compare(0, prefix.size(), prefix) != 0) {
+        LOG(ERROR) << "Invalid DPP URI prefix: " << dpp_uri;
+        return false;
+    }
+
+    dpp_bootstrapping_info = {};
+
+    std::string body = dpp_uri.substr(prefix.size());
+    std::stringstream ss(body);
+    std::string token;
+
+    while (std::getline(ss, token, ';')) {
+        if (token.empty()) {
+            continue;
+        }
+
+        auto sep = token.find(':');
+        if (sep == std::string::npos) {
+            continue;
+        }
+
+        std::string key = token.substr(0, sep);
+        std::string val = token.substr(sep + 1);
+
+        if (key == "C") {
+            std::stringstream cs(val);
+            std::string entry;
+            while (std::getline(cs, entry, ',')) {
+                auto slash = entry.find('/');
+                if (slash == std::string::npos) {
+                    continue;
+                }
+                try {
+                    uint8_t op_class = static_cast<uint8_t>(std::stoi(entry.substr(0, slash)));
+                    uint8_t channel  = static_cast<uint8_t>(std::stoi(entry.substr(slash + 1)));
+                    dpp_bootstrapping_info.operating_class_channel.emplace(op_class, channel);
+                } catch (const std::exception& e) {
+                    LOG(ERROR) << "Invalid number in DPP URI Operating Class/Channel: " << entry;
+                }
+            }
+        } else if (key == "M") {
+            std::string mac_with_colons;
+            for (size_t i = 0; i < val.size(); i += 2) {
+                if (i > 0) {
+                    mac_with_colons += ':';
+                }
+                mac_with_colons += val.substr(i, 2);
+            }
+            dpp_bootstrapping_info.mac = tlvf::mac_from_string(mac_with_colons);
+        } else if (key == "I") {
+            dpp_bootstrapping_info.info = val;
+        } else if (key == "V") {
+            try {
+                dpp_bootstrapping_info.version = static_cast<uint8_t>(std::stoi(val));
+            } catch (const std::exception& e) {
+                LOG(ERROR) << "Invalid number in DPP URI Version: " << val;
+            }
+        } else if (key == "H") {
+            dpp_bootstrapping_info.host = val;
+        } else if (key == "K") {
+            dpp_bootstrapping_info.public_key = val;
+        }
+    }
+
+    if (dpp_bootstrapping_info.public_key.empty()) {
+        LOG(ERROR) << "DPP URI missing mandatory public key (K field)";
+        return false;
+    }
+
+    return true;
+}
+
+std::string db::calculate_dpp_bootstrapping_str()
+{
+    std::string dpp_conn_string = "";
+    std::string opclass_channel_str;
+    for (const auto &ch : dpp_bootstrapping_info.operating_class_channel) {
+        opclass_channel_str += std::to_string(ch.first) + "/" + std::to_string(ch.second) + ",";
+    }
+    if (!opclass_channel_str.empty()) {
+        opclass_channel_str.pop_back();
+        dpp_conn_string += "C:" + opclass_channel_str + ";";
+    }
+
+    if (dpp_bootstrapping_info.mac != net::network_utils::ZERO_MAC) {
+        std::string mac_string = tlvf::mac_to_string(dpp_bootstrapping_info.mac);
+        mac_string.erase(std::remove(mac_string.begin(), mac_string.end(), ':'), mac_string.end());
+        dpp_conn_string += "M:" + mac_string + ";";
+    }
+    
+    if (!dpp_bootstrapping_info.info.empty())
+        dpp_conn_string += "I:" + dpp_bootstrapping_info.info + ";";
+
+    if (dpp_bootstrapping_info.version != 0)
+        dpp_conn_string += "V:" + std::to_string(dpp_bootstrapping_info.version) + ";";
+
+    if (!dpp_bootstrapping_info.host.empty())
+        dpp_conn_string += "H:" + dpp_bootstrapping_info.host + ";";
+
+    if (!dpp_bootstrapping_info.public_key.empty())
+        dpp_conn_string += "K:" + dpp_bootstrapping_info.public_key + ";";
+
+    if (dpp_conn_string.empty()) {
+        return "";
+    }
+
+    return "DPP:" + dpp_conn_string + ";";
+}
+
+
+on_action.cpp
+-----------------------------
+#include <amxc/amxc.h>
+#include <amxp/amxp.h>
+#include <amxd/amxd_dm.h>
+#include <amxd/amxd_object.h>
+#include <amxd/amxd_object_event.h>
+#include "db/db.h" 
+
+void _ProvisionedDPP_changed(const char *const sig_name,
+                             const amxc_var_t *const event_data,
+                             void *const priv)
+{
+    amxd_object_t *dpp_obj = amxd_dm_signal_get_object(nbapi::get_dm(), event_data);
+    if (!dpp_obj) {
+        return;
+    }
+
+    amxc_var_t *params = GET_ARG(event_data, "parameters");
+    if (!params) {
+        return;
+    }
+
+    amxc_var_t *dpp_uri_var = GET_ARG(params, "DPPURI");
+    if (dpp_uri_var) {
+        const char *new_uri = GETP_CHAR(dpp_uri_var, "to");
+        
+        if (new_uri) {
+            db::get_instance().dpp_uri_parse(std::string(new_uri));
+        }
+    }
+}
+
+controller.odl.in
+--------------------
+%persistent object ProvisionedDPP[] {
+    counted with ProvisionedDPPNumberOfEntries;
+    
+    // Trigger the C++ callback when a parameter in this table changes
+    on event "dm:object-changed" call ProvisionedDPP_changed;
+
+    %persistent string Alias = "";
+    %persistent string DPPURI = "";
+}
+
+// Add this line where other Ambiorix resolvers are registered
+amxo_resolver_ftab_add(parser, "ProvisionedDPP_changed", AMXO_FUNC(_ProvisionedDPP_changed));
+
