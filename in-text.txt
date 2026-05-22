@@ -1,0 +1,97 @@
+// -----------------------------------------------------------------------
+// db.h  — add declaration inside class db {}
+// -----------------------------------------------------------------------
+
+    bool parse_dpp_uri(const std::string &dpp_uri);
+
+
+// -----------------------------------------------------------------------
+// db.cpp — add implementation, and fix the MAC bug in
+//          calculate_dpp_bootstrapping_str()
+// -----------------------------------------------------------------------
+
+bool db::parse_dpp_uri(const std::string &dpp_uri)
+{
+    // Expected format: DPP:C:81/6;M:aabbccddeeff;K:MDkw...==;;
+    const std::string prefix = "DPP:";
+    if (dpp_uri.compare(0, prefix.size(), prefix) != 0) {
+        LOG(ERROR) << "Invalid DPP URI prefix: " << dpp_uri;
+        return false;
+    }
+
+    // Reset existing bootstrapping info
+    dpp_bootstrapping_info = {};
+
+    std::string body = dpp_uri.substr(prefix.size());
+
+    // Split on ';' to get individual key:value tokens
+    std::stringstream ss(body);
+    std::string token;
+    while (std::getline(ss, token, ';')) {
+        if (token.empty()) {
+            continue;
+        }
+
+        auto sep = token.find(':');
+        if (sep == std::string::npos) {
+            continue;
+        }
+
+        std::string key = token.substr(0, sep);
+        std::string val = token.substr(sep + 1);
+
+        if (key == "C") {
+            // e.g. "81/6,115/36"
+            std::stringstream cs(val);
+            std::string entry;
+            while (std::getline(cs, entry, ',')) {
+                auto slash = entry.find('/');
+                if (slash == std::string::npos) {
+                    continue;
+                }
+                uint8_t op_class = static_cast<uint8_t>(std::stoi(entry.substr(0, slash)));
+                uint8_t channel  = static_cast<uint8_t>(std::stoi(entry.substr(slash + 1)));
+                dpp_bootstrapping_info.operating_class_channel.emplace(op_class, channel);
+            }
+        } else if (key == "M") {
+            // e.g. "aabbccddeeff" (no colons)
+            std::string mac_with_colons;
+            for (size_t i = 0; i < val.size(); i += 2) {
+                if (i > 0) {
+                    mac_with_colons += ':';
+                }
+                mac_with_colons += val.substr(i, 2);
+            }
+            dpp_bootstrapping_info.mac = tlvf::mac_from_string(mac_with_colons);
+        } else if (key == "I") {
+            dpp_bootstrapping_info.info = val;
+        } else if (key == "V") {
+            dpp_bootstrapping_info.version = static_cast<uint8_t>(std::stoi(val));
+        } else if (key == "H") {
+            dpp_bootstrapping_info.host = val;
+        } else if (key == "K") {
+            dpp_bootstrapping_info.public_key = val;
+        }
+    }
+
+    if (dpp_bootstrapping_info.public_key.empty()) {
+        LOG(ERROR) << "DPP URI missing mandatory public key (K field)";
+        return false;
+    }
+
+    return true;
+}
+
+// -----------------------------------------------------------------------
+// Bug fix in calculate_dpp_bootstrapping_str() — MAC colon removal
+// -----------------------------------------------------------------------
+
+// BEFORE (broken — removes all characters):
+//     mac_string.erase(std::remove_if(mac_string.begin(), mac_string.end(),
+//                                     [&mac_string](const char &c) {
+//                                         return mac_string.find(c) != std::string::npos;
+//                                     }),
+//                      mac_string.end());
+
+// AFTER (correct — removes only ':'):
+    mac_string.erase(std::remove(mac_string.begin(), mac_string.end(), ':'), mac_string.end());
