@@ -1,0 +1,42 @@
+--- a/controller/nbapi/on_action.cpp
++++ b/controller/nbapi/on_action.cpp
+@@ event handlers section (before get_actions_callback_list) @@
+
++static void event_provisioned_dpp_changed(const char *const sig_name, const amxc_var_t *const data,
++                                          void *const priv)
++{
++    amxd_object_t *dpp_obj =
++        amxd_dm_signal_get_object(beerocks::nbapi::Amxrt::getDatamodel(), data);
++
++    if (!dpp_obj) {
++        LOG(WARNING) << "Failed to get ProvisionedDPP object";
++        return;
++    }
++
++    std::string dpp_uri = get_param_string(dpp_obj, "DPPURI");
++    if (dpp_uri.empty()) {
++        LOG(WARNING) << "DPPURI is empty, nothing to process";
++        return;
++    }
++
++    auto controller_ctx = g_database->get_controller_ctx();
++    if (!controller_ctx) {
++        LOG(ERROR) << "Failed to get controller context";
++        return;
++    }
++
++    controller_ctx->handle_dpp_bootstrap_uri(dpp_uri);
++}
+
+@@ get_events_list() @@
+
+ std::vector<beerocks::nbapi::sEvents> get_events_list(void)
+ {
+     const std::vector<beerocks::nbapi::sEvents> events_list = {
+         {"event_configuration_changed", event_configuration_changed},
+         {"event_network_group_changed", event_network_group_changed},
+-        {"event_network_enable_changed", event_network_enable_changed}};
++        {"event_network_enable_changed", event_network_enable_changed},
++        {"event_provisioned_dpp_changed", event_provisioned_dpp_changed}};
+     return events_list;
+ }

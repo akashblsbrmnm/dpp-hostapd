@@ -1,0 +1,11 @@
+--- a/controller/odl/controller.odl.in
++++ b/controller/odl/controller.odl.in
+@@ object Network {
+ 
++                    object ProvisionedDPP[] {
++                        counted with ProvisionedDPPNumberOfEntries;
++                        %persistent string Alias = "";
++                        %persistent string DPPURI = "";
++                    }
++
+                 }
