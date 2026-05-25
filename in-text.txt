@@ -1,68 +1,60 @@
-// on_action.cpp — corrected event_provisioned_dpp_changed
-// Fixes:
-//   1. get_param_string key changed from "DPPURI" to "DPP_URI" (matches ODL)
-//   2. variable name unified: dpp_struct_info used consistently (was dpp_info_struct at call site)
-//   3. event registered in get_events_list()
-
-static void event_provisioned_dpp_changed(const char *const sig_name, const amxc_var_t *const data,
-                                          void *const priv)
-{
-    amxd_object_t *dpp_obj =
-        amxd_dm_signal_get_object(beerocks::nbapi::Amxrt::getDatamodel(), data);
-
-    if (!dpp_obj) {
-        LOG(WARNING) << "Failed to get Provisioned DPP object";
-        return;
-    }
-
-    std::string dpp_uri = get_param_string(dpp_obj, "DPP_URI");
-    if (dpp_uri.empty()) {
-        LOG(WARNING) << "DPP_URI is empty, nothing to process";
-        return;
-    }
-
-    son::db::sDppBootstrappingInfo dpp_struct_info;
-    if (!g_database->dpp_uri_parse(dpp_uri, dpp_struct_info)) {
-        LOG(ERROR) << "Failed to parse DPP_URI: " << dpp_uri;
-    }
-}
-
-// In get_events_list() — corrected (original had duplicate closing brace syntax error):
-std::vector<beerocks::nbapi::sEvents> get_events_list(void)
-{
-    const std::vector<beerocks::nbapi::sEvents> events_list = {
-        {"event_configuration_changed", event_configuration_changed},
-        {"event_traffic_separation_changed", event_traffic_separation_changed},
-        {"event_network_group_changed", event_network_group_changed},
-        {"event_network_enable_changed", event_network_enable_changed},
-        {"event_provisioned_dpp_changed", event_provisioned_dpp_changed}};
-    return events_list;
-}
-
-123456789
-
 // -----------------------------------------------------------------------
-// db.h — add inside class db {}
+// db.h — changes for multiple DPP URI support
 // -----------------------------------------------------------------------
 
-    bool dpp_uri_parse(const std::string &dpp_uri, sDppBootstrappingInfo &dpp_info);
+// REPLACE the existing single-instance struct+member:
+//
+//   struct sDppBootstrappingInfo {
+//       std::multimap<uint8_t, uint8_t> operating_class_channel;
+//       sMacAddr mac;
+//       std::string info;
+//       uint8_t version = 0;
+//       std::string host;
+//       std::string public_key;
+//   } dpp_bootstrapping_info;
+//
+// WITH:
+
+    struct sDppBootstrappingInfo {
+        std::string alias;
+        std::multimap<uint8_t, uint8_t> operating_class_channel;
+        sMacAddr mac;
+        std::string info;
+        uint8_t version = 0;
+        std::string host;
+        std::string public_key;
+    };
+
+    // Keyed by Alias for fast lookup and deduplication
+    std::unordered_map<std::string, sDppBootstrappingInfo> dpp_bootstrapping_map;
+
+// -----------------------------------------------------------------------
+// ADD these method declarations inside class db {}:
+
+    bool dpp_uri_parse(const std::string &alias, const std::string &dpp_uri);
+    void remove_dpp_bootstrapping_info(const std::string &alias);
+    const std::unordered_map<std::string, sDppBootstrappingInfo> &get_dpp_bootstrapping_map() const;
+
 
 
 // -----------------------------------------------------------------------
-// db.cpp — corrected dpp_uri_parse
-// Fixes:
-//   1. Removed trailing comma in parameter list
-//   2. Parameter renamed from dpp_info to dpp_info (was dpp_info_struct in body — unified)
-//   3. const std::string& instead of const std::string (avoid copy)
+// db.cpp — updated dpp_uri_parse and new helpers
 // -----------------------------------------------------------------------
 
-bool db::dpp_uri_parse(const std::string &dpp_uri, sDppBootstrappingInfo &dpp_info)
+// NOTE: calculate_dpp_bootstrapping_str() still works — it can be updated
+// later to take an alias parameter if needed. For now it reads from the
+// map by alias if required, or can be left as-is for backward compat.
+
+bool db::dpp_uri_parse(const std::string &alias, const std::string &dpp_uri)
 {
     const std::string prefix = "DPP:";
     if (dpp_uri.compare(0, prefix.size(), prefix) != 0) {
         LOG(ERROR) << "Invalid DPP URI prefix: " << dpp_uri;
         return false;
     }
+
+    sDppBootstrappingInfo dpp_info;
+    dpp_info.alias = alias;
 
     std::string body = dpp_uri.substr(prefix.size());
     std::stringstream ss(body);
@@ -122,9 +114,127 @@ bool db::dpp_uri_parse(const std::string &dpp_uri, sDppBootstrappingInfo &dpp_in
     }
 
     if (dpp_info.public_key.empty()) {
-        LOG(ERROR) << "DPP URI missing mandatory public key (K field)";
+        LOG(ERROR) << "DPP URI missing mandatory public key (K field) for alias: " << alias;
         return false;
     }
 
+    // Insert or overwrite entry for this Alias
+    dpp_bootstrapping_map[alias] = std::move(dpp_info);
+    LOG(DEBUG) << "Stored DPP bootstrapping info for alias: " << alias
+               << ", total entries: " << dpp_bootstrapping_map.size();
+
     return true;
 }
+
+void db::remove_dpp_bootstrapping_info(const std::string &alias)
+{
+    auto it = dpp_bootstrapping_map.find(alias);
+    if (it != dpp_bootstrapping_map.end()) {
+        dpp_bootstrapping_map.erase(it);
+        LOG(DEBUG) << "Removed DPP bootstrapping info for alias: " << alias;
+    }
+}
+
+const std::unordered_map<std::string, db::sDppBootstrappingInfo> &
+db::get_dpp_bootstrapping_map() const
+{
+    return dpp_bootstrapping_map;
+}
+
+
+// -----------------------------------------------------------------------
+// on_action.cpp — updated event_provisioned_dpp_changed
+// Now reads Alias too, passes both to dpp_uri_parse
+// Also handles instance removal via "dm:instance-removed" signal
+// -----------------------------------------------------------------------
+
+static void event_provisioned_dpp_changed(const char *const sig_name, const amxc_var_t *const data,
+                                          void *const priv)
+{
+    amxd_object_t *dpp_obj =
+        amxd_dm_signal_get_object(beerocks::nbapi::Amxrt::getDatamodel(), data);
+
+    if (!dpp_obj) {
+        LOG(WARNING) << "Failed to get ProvisionedDPP object";
+        return;
+    }
+
+    std::string alias   = get_param_string(dpp_obj, "Alias");
+    std::string dpp_uri = get_param_string(dpp_obj, "DPP_URI");
+
+    if (alias.empty()) {
+        LOG(WARNING) << "ProvisionedDPP Alias is empty, skipping";
+        return;
+    }
+
+    if (dpp_uri.empty()) {
+        LOG(WARNING) << "DPP_URI is empty for alias: " << alias;
+        return;
+    }
+
+    if (!g_database->dpp_uri_parse(alias, dpp_uri)) {
+        LOG(ERROR) << "Failed to parse DPP_URI for alias: " << alias;
+    }
+}
+
+static void event_provisioned_dpp_removed(const char *const sig_name, const amxc_var_t *const data,
+                                          void *const priv)
+{
+    // When an ACS deletes a ProvisionedDPP instance, remove it from db too
+    amxd_object_t *dpp_obj =
+        amxd_dm_signal_get_object(beerocks::nbapi::Amxrt::getDatamodel(), data);
+
+    if (!dpp_obj) {
+        LOG(WARNING) << "Failed to get ProvisionedDPP object on removal";
+        return;
+    }
+
+    std::string alias = get_param_string(dpp_obj, "Alias");
+    if (alias.empty()) {
+        LOG(WARNING) << "ProvisionedDPP Alias is empty on removal, skipping";
+        return;
+    }
+
+    g_database->remove_dpp_bootstrapping_info(alias);
+}
+
+// -----------------------------------------------------------------------
+// get_events_list() — register both handlers
+// -----------------------------------------------------------------------
+
+std::vector<beerocks::nbapi::sEvents> get_events_list(void)
+{
+    const std::vector<beerocks::nbapi::sEvents> events_list = {
+        {"event_configuration_changed", event_configuration_changed},
+        {"event_traffic_separation_changed", event_traffic_separation_changed},
+        {"event_network_group_changed", event_network_group_changed},
+        {"event_network_enable_changed", event_network_enable_changed},
+        {"event_provisioned_dpp_changed", event_provisioned_dpp_changed},
+        {"event_provisioned_dpp_removed", event_provisioned_dpp_removed}};
+    return events_list;
+}
+
+
+/* -----------------------------------------------------------------------
+   controller.odl.in — ProvisionedDPP object with events wired
+   ----------------------------------------------------------------------- */
+
+                    /* DPP Provisioning */
+                    object ProvisionedDPP[] {
+                        counted with ProvisionedDPPNumberOfEntries;
+                        %persistent string Alias = "";
+                        %persistent string DPP_URI = "";
+                        on event "dm:object-changed" call event_provisioned_dpp_changed;
+                        on event "dm:instance-removed" call event_provisioned_dpp_removed;
+                    }
+
+/* -----------------------------------------------------------------------
+   Why two events:
+
+   "dm:object-changed"  — fires when ACS writes DPP_URI to an existing
+                          instance → parse and store in db
+
+   "dm:instance-removed" — fires when ACS deletes a ProvisionedDPP instance
+                           → remove from db so stale URIs don't persist
+   ----------------------------------------------------------------------- */
+
