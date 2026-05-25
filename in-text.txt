@@ -1,32 +1,73 @@
-// -----------------------------------------------------------------------
-// db.h  — add declaration inside class db {}
-// -----------------------------------------------------------------------
+// on_action.cpp — corrected event_provisioned_dpp_changed
+// Fixes:
+//   1. get_param_string key changed from "DPPURI" to "DPP_URI" (matches ODL)
+//   2. variable name unified: dpp_struct_info used consistently (was dpp_info_struct at call site)
+//   3. event registered in get_events_list()
 
-    bool parse_dpp_uri(const std::string &dpp_uri);
-
-
-// -----------------------------------------------------------------------
-// db.cpp — add implementation, and fix the MAC bug in
-//          calculate_dpp_bootstrapping_str()
-// -----------------------------------------------------------------------
-
-bool db::parse_dpp_uri(const std::string &dpp_uri)
+static void event_provisioned_dpp_changed(const char *const sig_name, const amxc_var_t *const data,
+                                          void *const priv)
 {
-    // Expected format: DPP:C:81/6;M:aabbccddeeff;K:MDkw...==;;
+    amxd_object_t *dpp_obj =
+        amxd_dm_signal_get_object(beerocks::nbapi::Amxrt::getDatamodel(), data);
+
+    if (!dpp_obj) {
+        LOG(WARNING) << "Failed to get Provisioned DPP object";
+        return;
+    }
+
+    std::string dpp_uri = get_param_string(dpp_obj, "DPP_URI");
+    if (dpp_uri.empty()) {
+        LOG(WARNING) << "DPP_URI is empty, nothing to process";
+        return;
+    }
+
+    son::db::sDppBootstrappingInfo dpp_struct_info;
+    if (!g_database->dpp_uri_parse(dpp_uri, dpp_struct_info)) {
+        LOG(ERROR) << "Failed to parse DPP_URI: " << dpp_uri;
+    }
+}
+
+// In get_events_list() — corrected (original had duplicate closing brace syntax error):
+std::vector<beerocks::nbapi::sEvents> get_events_list(void)
+{
+    const std::vector<beerocks::nbapi::sEvents> events_list = {
+        {"event_configuration_changed", event_configuration_changed},
+        {"event_traffic_separation_changed", event_traffic_separation_changed},
+        {"event_network_group_changed", event_network_group_changed},
+        {"event_network_enable_changed", event_network_enable_changed},
+        {"event_provisioned_dpp_changed", event_provisioned_dpp_changed}};
+    return events_list;
+}
+
+123456789
+
+// -----------------------------------------------------------------------
+// db.h — add inside class db {}
+// -----------------------------------------------------------------------
+
+    bool dpp_uri_parse(const std::string &dpp_uri, sDppBootstrappingInfo &dpp_info);
+
+
+// -----------------------------------------------------------------------
+// db.cpp — corrected dpp_uri_parse
+// Fixes:
+//   1. Removed trailing comma in parameter list
+//   2. Parameter renamed from dpp_info to dpp_info (was dpp_info_struct in body — unified)
+//   3. const std::string& instead of const std::string (avoid copy)
+// -----------------------------------------------------------------------
+
+bool db::dpp_uri_parse(const std::string &dpp_uri, sDppBootstrappingInfo &dpp_info)
+{
     const std::string prefix = "DPP:";
     if (dpp_uri.compare(0, prefix.size(), prefix) != 0) {
         LOG(ERROR) << "Invalid DPP URI prefix: " << dpp_uri;
         return false;
     }
 
-    // Reset existing bootstrapping info
-    dpp_bootstrapping_info = {};
-
     std::string body = dpp_uri.substr(prefix.size());
-
-    // Split on ';' to get individual key:value tokens
     std::stringstream ss(body);
     std::string token;
+
     while (std::getline(ss, token, ';')) {
         if (token.empty()) {
             continue;
@@ -41,7 +82,6 @@ bool db::parse_dpp_uri(const std::string &dpp_uri)
         std::string val = token.substr(sep + 1);
 
         if (key == "C") {
-            // e.g. "81/6,115/36"
             std::stringstream cs(val);
             std::string entry;
             while (std::getline(cs, entry, ',')) {
@@ -49,12 +89,15 @@ bool db::parse_dpp_uri(const std::string &dpp_uri)
                 if (slash == std::string::npos) {
                     continue;
                 }
-                uint8_t op_class = static_cast<uint8_t>(std::stoi(entry.substr(0, slash)));
-                uint8_t channel  = static_cast<uint8_t>(std::stoi(entry.substr(slash + 1)));
-                dpp_bootstrapping_info.operating_class_channel.emplace(op_class, channel);
+                try {
+                    uint8_t op_class = static_cast<uint8_t>(std::stoi(entry.substr(0, slash)));
+                    uint8_t channel  = static_cast<uint8_t>(std::stoi(entry.substr(slash + 1)));
+                    dpp_info.operating_class_channel.emplace(op_class, channel);
+                } catch (const std::exception &e) {
+                    LOG(ERROR) << "Invalid C field in DPP URI: " << entry;
+                }
             }
         } else if (key == "M") {
-            // e.g. "aabbccddeeff" (no colons)
             std::string mac_with_colons;
             for (size_t i = 0; i < val.size(); i += 2) {
                 if (i > 0) {
@@ -62,36 +105,26 @@ bool db::parse_dpp_uri(const std::string &dpp_uri)
                 }
                 mac_with_colons += val.substr(i, 2);
             }
-            dpp_bootstrapping_info.mac = tlvf::mac_from_string(mac_with_colons);
+            dpp_info.mac = tlvf::mac_from_string(mac_with_colons);
         } else if (key == "I") {
-            dpp_bootstrapping_info.info = val;
+            dpp_info.info = val;
         } else if (key == "V") {
-            dpp_bootstrapping_info.version = static_cast<uint8_t>(std::stoi(val));
+            try {
+                dpp_info.version = static_cast<uint8_t>(std::stoi(val));
+            } catch (const std::exception &e) {
+                LOG(ERROR) << "Invalid V field in DPP URI: " << val;
+            }
         } else if (key == "H") {
-            dpp_bootstrapping_info.host = val;
+            dpp_info.host = val;
         } else if (key == "K") {
-            dpp_bootstrapping_info.public_key = val;
+            dpp_info.public_key = val;
         }
     }
 
-    if (dpp_bootstrapping_info.public_key.empty()) {
+    if (dpp_info.public_key.empty()) {
         LOG(ERROR) << "DPP URI missing mandatory public key (K field)";
         return false;
     }
 
     return true;
 }
-
-// -----------------------------------------------------------------------
-// Bug fix in calculate_dpp_bootstrapping_str() — MAC colon removal
-// -----------------------------------------------------------------------
-
-// BEFORE (broken — removes all characters):
-//     mac_string.erase(std::remove_if(mac_string.begin(), mac_string.end(),
-//                                     [&mac_string](const char &c) {
-//                                         return mac_string.find(c) != std::string::npos;
-//                                     }),
-//                      mac_string.end());
-
-// AFTER (correct — removes only ':'):
-    mac_string.erase(std::remove(mac_string.begin(), mac_string.end(), ':'), mac_string.end());
