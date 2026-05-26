@@ -1,0 +1,21 @@
+// controller.odl.in — ProvisionedDPP object with commit function
+
+                    /* DPP Provisioning */
+                    object ProvisionedDPP[] {
+                        counted with ProvisionedDPPNumberOfEntries;
+                        %persistent string Alias = "";
+                        %persistent string DPP_URI = "";
+                    }
+
+                    void ProvisionedDPPCommit();
+
+// %populate section — remove event_provisioned_dpp_changed, not needed anymore
+// REMOVE these two lines:
+//
+//    on event "dm:object-changed" call event_provisioned_dpp_changed
+//        filter 'object matches "...Network\.ProvisionedDPP\."';
+//
+// KEEP dm:instance-removed for cleanup:
+
+    on event "dm:instance-removed" call event_provisioned_dpp_removed
+        filter 'object matches "@DATAELEMENTS_ROOT_DM_literal@\.Network\.ProvisionedDPP\."';
