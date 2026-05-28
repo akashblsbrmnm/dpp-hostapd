@@ -1,152 +1,61 @@
-// on_action.cpp — event_provisioned_dpp_changed with maximum debug logging
-
 static void event_provisioned_dpp_changed(const char *const sig_name, const amxc_var_t *const data,
                                           void *const priv)
 {
-    LOG(DEBUG) << "event_provisioned_dpp_changed fired, sig_name: " << sig_name;
-
     amxd_object_t *dpp_obj =
         amxd_dm_signal_get_object(beerocks::nbapi::Amxrt::getDatamodel(), data);
 
     if (!dpp_obj) {
-        LOG(WARNING) << "Failed to get ProvisionedDPP object from datamodel signal";
-        return;
-    }
-    LOG(DEBUG) << "ProvisionedDPP object retrieved successfully";
-
-    std::string alias = get_param_string(dpp_obj, "Alias");
-    LOG(DEBUG) << "Read Alias from DM object: '" << alias << "'";
-
-    if (alias.empty()) {
-        LOG(WARNING) << "ProvisionedDPP Alias is empty, skipping parse";
+        LOG(WARNING) << "Failed to get ProvisionedDPP object";
         return;
     }
 
-    std::string dpp_uri = get_param_string(dpp_obj, "DPP_URI");
-    LOG(DEBUG) << "Read DPP_URI from DM object: '" << dpp_uri << "'";
+    const char *alias   = amxd_object_get_cstring_t(dpp_obj, "Alias", nullptr);
+    const char *dpp_uri = amxd_object_get_cstring_t(dpp_obj, "DPP_URI", nullptr);
 
-    if (dpp_uri.empty()) {
-        LOG(WARNING) << "DPP_URI is empty for alias: " << alias << ", skipping parse";
+    if (!alias || alias[0] == '\0') {
+        LOG(WARNING) << "ProvisionedDPP Alias is empty, skipping";
         return;
     }
 
-    LOG(DEBUG) << "Calling dpp_uri_parse for alias: " << alias;
-    if (!g_database->dpp_uri_parse(alias, dpp_uri)) {
-        LOG(ERROR) << "dpp_uri_parse failed for alias: " << alias << ", DPP_URI: " << dpp_uri;
+    if (!dpp_uri || dpp_uri[0] == '\0') {
+        LOG(WARNING) << "DPP_URI is empty for alias: " << alias;
         return;
     }
-    LOG(DEBUG) << "dpp_uri_parse succeeded for alias: " << alias;
+
+    if (!g_database->dpp_uri_parse(std::string(alias), std::string(dpp_uri))) {
+        LOG(ERROR) << "Failed to parse DPP_URI for alias: " << alias;
+    }
 }
 
 
-// db.cpp — dpp_uri_parse with maximum debug logging
+on event "dm:object-changed" call event_provisioned_dpp_changed
+    filter 'object matches "@DATAELEMENTS_ROOT_DM_literal@\.Network\.ProvisionedDPP\." && contains("parameters.DPP_URI")';
 
-bool db::dpp_uri_parse(const std::string &alias, const std::string &dpp_uri)
+on event "dm:instance-removed" call event_provisioned_dpp_removed
+    filter 'object matches "@DATAELEMENTS_ROOT_DM_literal@\.Network\.ProvisionedDPP\."';
+
+
+{"event_provisioned_dpp_changed", event_provisioned_dpp_changed},
+{"event_provisioned_dpp_removed", event_provisioned_dpp_removed}
+
+
+static void event_provisioned_dpp_removed(const char *const sig_name, const amxc_var_t *const data,
+                                          void *const priv)
 {
-    LOG(DEBUG) << "dpp_uri_parse called with alias: '" << alias << "', dpp_uri: '" << dpp_uri << "'";
+    amxd_object_t *dpp_obj =
+        amxd_dm_signal_get_object(beerocks::nbapi::Amxrt::getDatamodel(), data);
 
-    const std::string prefix = "DPP:";
-    if (dpp_uri.compare(0, prefix.size(), prefix) != 0) {
-        LOG(ERROR) << "Invalid DPP URI prefix, expected 'DPP:', got: '"
-                   << dpp_uri.substr(0, prefix.size()) << "'";
-        return false;
-    }
-    LOG(DEBUG) << "DPP URI prefix validated";
-
-    sDppBootstrappingInfo dpp_info;
-    dpp_info.alias = alias;
-
-    std::string body = dpp_uri.substr(prefix.size());
-    LOG(DEBUG) << "DPP URI body after prefix strip: '" << body << "'";
-
-    std::stringstream ss(body);
-    std::string token;
-
-    while (std::getline(ss, token, ';')) {
-        if (token.empty()) {
-            LOG(DEBUG) << "Empty token skipped";
-            continue;
-        }
-
-        LOG(DEBUG) << "Processing token: '" << token << "'";
-
-        auto sep = token.find(':');
-        if (sep == std::string::npos) {
-            LOG(WARNING) << "Token has no ':' separator, skipping: '" << token << "'";
-            continue;
-        }
-
-        std::string key = token.substr(0, sep);
-        std::string val = token.substr(sep + 1);
-        LOG(DEBUG) << "Parsed key: '" << key << "', val: '" << val << "'";
-
-        if (key == "C") {
-            LOG(DEBUG) << "Parsing channel/opclass field: '" << val << "'";
-            std::stringstream cs(val);
-            std::string entry;
-            while (std::getline(cs, entry, ',')) {
-                auto slash = entry.find('/');
-                if (slash == std::string::npos) {
-                    LOG(WARNING) << "Channel entry missing '/', skipping: '" << entry << "'";
-                    continue;
-                }
-                try {
-                    uint8_t op_class = static_cast<uint8_t>(std::stoi(entry.substr(0, slash)));
-                    uint8_t channel  = static_cast<uint8_t>(std::stoi(entry.substr(slash + 1)));
-                    dpp_info.operating_class_channel.emplace(op_class, channel);
-                    LOG(DEBUG) << "Added op_class: " << (int)op_class << ", channel: " << (int)channel;
-                } catch (const std::exception &e) {
-                    LOG(ERROR) << "Exception parsing C field entry '" << entry << "': " << e.what();
-                }
-            }
-        } else if (key == "M") {
-            LOG(DEBUG) << "Parsing MAC field: '" << val << "'";
-            std::string mac_with_colons;
-            for (size_t i = 0; i < val.size(); i += 2) {
-                if (i > 0) {
-                    mac_with_colons += ':';
-                }
-                mac_with_colons += val.substr(i, 2);
-            }
-            dpp_info.mac = tlvf::mac_from_string(mac_with_colons);
-            LOG(DEBUG) << "Parsed MAC: " << dpp_info.mac;
-        } else if (key == "I") {
-            dpp_info.info = val;
-            LOG(DEBUG) << "Parsed info: '" << dpp_info.info << "'";
-        } else if (key == "V") {
-            LOG(DEBUG) << "Parsing version field: '" << val << "'";
-            try {
-                dpp_info.version = static_cast<uint8_t>(std::stoi(val));
-                LOG(DEBUG) << "Parsed version: " << (int)dpp_info.version;
-            } catch (const std::exception &e) {
-                LOG(ERROR) << "Exception parsing V field '" << val << "': " << e.what();
-            }
-        } else if (key == "H") {
-            dpp_info.host = val;
-            LOG(DEBUG) << "Parsed host: '" << dpp_info.host << "'";
-        } else if (key == "K") {
-            dpp_info.public_key = val;
-            LOG(DEBUG) << "Parsed public_key length: " << dpp_info.public_key.size() << " chars";
-        } else {
-            LOG(DEBUG) << "Unknown key '" << key << "' ignored";
-        }
+    if (!dpp_obj) {
+        LOG(WARNING) << "Failed to get ProvisionedDPP object on removal";
+        return;
     }
 
-    if (dpp_info.public_key.empty()) {
-        LOG(ERROR) << "DPP URI missing mandatory K (public key) field for alias: " << alias;
-        return false;
+    const char *alias = amxd_object_get_cstring_t(dpp_obj, "Alias", nullptr);
+    if (!alias || alias[0] == '\0') {
+        LOG(WARNING) << "ProvisionedDPP Alias is empty on removal, skipping";
+        return;
     }
 
-    bool overwrite = (dpp_bootstrapping_map.find(alias) != dpp_bootstrapping_map.end());
-    dpp_bootstrapping_map[alias] = std::move(dpp_info);
-
-    if (overwrite) {
-        LOG(DEBUG) << "Overwrote existing DPP entry for alias: " << alias
-                   << ", total entries: " << dpp_bootstrapping_map.size();
-    } else {
-        LOG(DEBUG) << "Inserted new DPP entry for alias: " << alias
-                   << ", total entries: " << dpp_bootstrapping_map.size();
-    }
-
-    return true;
+    LOG(DEBUG) << "Removing DPP bootstrapping info for alias: " << alias;
+    g_database->remove_dpp_bootstrapping_info(std::string(alias));
 }
