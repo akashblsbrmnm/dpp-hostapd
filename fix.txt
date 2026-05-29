@@ -1,0 +1,261 @@
+// db.h — two public methods
+std::string calculate_dpp_bootstrapping_str(const sDppBootstrappingInfo &info);
+const sDppBootstrappingInfo *get_dpp_info_by_mac(const sMacAddr &mac) const;
+
+// db.cpp
+const db::sDppBootstrappingInfo *db::get_dpp_info_by_mac(const sMacAddr &mac) const
+{
+    for (const auto &entry : dpp_bootstrapping_map) {
+        if (entry.second.mac == mac) {
+            return &entry.second;
+        }
+    }
+    return nullptr;
+}
+
+// OLD
+vbss_creation_req->set_dpp_connector(database.calculate_dpp_bootstrapping_str());
+
+// NEW
+const auto *dpp_info = database.get_dpp_info_by_mac(client_vbss.client_mac);
+if (dpp_info) {
+    vbss_creation_req->set_dpp_connector(
+        database.calculate_dpp_bootstrapping_str(*dpp_info));
+} else {
+    LOG(DEBUG) << "No DPP bootstrapping info found for client MAC: "
+               << client_vbss.client_mac << ", skipping DPP connector";
+}
+
+===========================================================================
+FIX 1 — db.h
+===========================================================================
+
+1a. struct definition — change typedef struct to proper struct, add alias field,
+    move dpp_bootstrapping_map to PRIVATE, move methods to PUBLIC:
+
+// REMOVE this (old):
+    struct sDppBootstrappingInfo {
+        std::multimap<uint8_t, uint8_t> operating_class_channel;
+        sMacAddr mac;
+        std::string info;
+        uint8_t version = 0;
+        std::string host;
+        std::string public_key;
+    } dpp_bootstrapping_info;
+
+// REPLACE WITH (in public section):
+    struct sDppBootstrappingInfo {
+        std::string alias;
+        std::multimap<uint8_t, uint8_t> operating_class_channel;
+        sMacAddr mac;
+        std::string info;
+        uint8_t version = 0;
+        std::string host;
+        std::string public_key;
+    };
+
+    // Public methods
+    bool dpp_uri_parse(const std::string &alias, const std::string &dpp_uri);
+    void remove_dpp_bootstrapping_info(const std::string &alias);
+    const sDppBootstrappingInfo *get_dpp_info_by_mac(const sMacAddr &mac) const;
+    static std::string calculate_dpp_bootstrapping_str(const sDppBootstrappingInfo &info);
+
+// In PRIVATE section — add map:
+    std::unordered_map<std::string, sDppBootstrappingInfo> dpp_bootstrapping_map;
+
+// REMOVE from private section (was wrongly private):
+//    bool dpp_uri_parse(...);
+//    const std::unordered_map<...> &get_dpp_bootstrapping_map() const;
+
+// REMOVE public map exposure:
+//    std::unordered_map<std::string, sDppBootstrappingInfo> dpp_bootstrapping_map;  ← was public, wrong
+
+
+===========================================================================
+FIX 2 — db.cpp
+===========================================================================
+
+2a. calculate_dpp_bootstrapping_str — change signature to take struct, fix MAC bug,
+    fix suffix (;; not ;):
+
+// OLD signature:
+std::string db::calculate_dpp_bootstrapping_str()
+
+// NEW:
+std::string db::calculate_dpp_bootstrapping_str(const sDppBootstrappingInfo &info)
+{
+    std::string dpp_conn_string;
+    std::string opclass_channel_str;
+
+    for (const auto &ch : info.operating_class_channel) {
+        opclass_channel_str += std::to_string(ch.first) + "/" + std::to_string(ch.second) + ",";
+    }
+    if (!opclass_channel_str.empty()) {
+        opclass_channel_str.pop_back();
+        dpp_conn_string += "C:" + opclass_channel_str + ";";
+    }
+
+    if (info.mac != net::network_utils::ZERO_MAC) {
+        std::string mac_string = tlvf::mac_to_string(info.mac);
+        // FIX: was broken lambda that removed all chars, now correctly removes only ':'
+        mac_string.erase(std::remove(mac_string.begin(), mac_string.end(), ':'),
+                         mac_string.end());
+        dpp_conn_string += "M:" + mac_string + ";";
+    }
+
+    if (!info.info.empty())       dpp_conn_string += "I:" + info.info + ";";
+    if (info.version != 0)        dpp_conn_string += "V:" + std::to_string(info.version) + ";";
+    if (!info.host.empty())       dpp_conn_string += "H:" + info.host + ";";
+    if (!info.public_key.empty()) dpp_conn_string += "K:" + info.public_key + ";";
+
+    if (dpp_conn_string.empty()) {
+        return "";
+    }
+
+    return "DPP:" + dpp_conn_string + ";;";  // FIX: was single ";" suffix, DPP spec requires ";;"
+}
+
+2b. add get_dpp_info_by_mac:
+
+const db::sDppBootstrappingInfo *db::get_dpp_info_by_mac(const sMacAddr &mac) const
+{
+    for (const auto &entry : dpp_bootstrapping_map) {
+        if (entry.second.mac == mac) {
+            return &entry.second;
+        }
+    }
+    return nullptr;
+}
+
+2c. add remove_dpp_bootstrapping_info:
+
+void db::remove_dpp_bootstrapping_info(const std::string &alias)
+{
+    auto it = dpp_bootstrapping_map.find(alias);
+    if (it != dpp_bootstrapping_map.end()) {
+        dpp_bootstrapping_map.erase(it);
+        LOG(DEBUG) << "Removed DPP bootstrapping info for alias: " << alias;
+    }
+}
+
+2d. dpp_uri_parse — already correct in patch, no change needed.
+
+2e. REMOVE get_dpp_bootstrapping_map — unused, remove from db.cpp and db.h.
+
+
+===========================================================================
+FIX 3 — controller_ucc_listener.cpp
+===========================================================================
+
+3a. Direct map access is acceptable here since ucc_listener parses its own
+    format separately. But dpp_bootstrapping_map is now private — add a
+    public method to db for this:
+
+// db.h public:
+    void add_dpp_bootstrapping_info(const std::string &alias, sDppBootstrappingInfo info);
+
+// db.cpp:
+void db::add_dpp_bootstrapping_info(const std::string &alias, sDppBootstrappingInfo info)
+{
+    dpp_bootstrapping_map[alias] = std::move(info);
+    LOG(DEBUG) << "Stored DPP bootstrapping info for alias: " << alias
+               << ", total entries: " << dpp_bootstrapping_map.size();
+}
+
+3b. In controller_ucc_listener.cpp replace direct map access:
+
+// OLD:
+        m_database.dpp_bootstrapping_map[alias] = std::move(enrollee_bootstrapping_info);
+        LOG(DEBUG) << "Stored DPP bootstrapping info for alias: " << alias
+                   << ", total entries: " << m_database.dpp_bootstrapping_map.size();
+
+// NEW:
+        m_database.add_dpp_bootstrapping_info(alias, std::move(enrollee_bootstrapping_info));
+
+
+===========================================================================
+FIX 4 — vbss_actions.cpp
+===========================================================================
+
+// OLD:
+    vbss_creation_req->set_dpp_connector(database.calculate_dpp_bootstrapping_str());
+
+// NEW:
+    const auto *dpp_info = database.get_dpp_info_by_mac(client_vbss.client_mac);
+    if (dpp_info) {
+        vbss_creation_req->set_dpp_connector(
+            db::calculate_dpp_bootstrapping_str(*dpp_info));
+    } else {
+        LOG(DEBUG) << "No DPP bootstrapping info for client MAC: "
+                   << client_vbss.client_mac << ", skipping DPP connector";
+    }
+
+
+===========================================================================
+FIX 5 — on_action.cpp
+===========================================================================
+
+// ODL field name is DPPURI (no underscore) — fix the read:
+
+// OLD:
+    const char *dpp_uri = amxd_object_get_cstring_t(dpp_obj, "DPP_URI", nullptr);
+
+// NEW — must match ODL field name exactly:
+    const char *dpp_uri = amxd_object_get_cstring_t(dpp_obj, "DPPURI", nullptr);
+
+
+===========================================================================
+FIX 6 — controller.odl.in
+===========================================================================
+
+// ODL field name must match what on_action reads — keep consistent:
+// patch has DPPURI (no underscore) which is correct per BBF spec.
+// No change needed if already DPPURI.
+
+// Add contains() filter to avoid firing on Alias-only change:
+
+// OLD:
+    on event "dm:object-changed" call event_provisioned_dpp_changed
+        filter 'object matches "@DATAELEMENTS_ROOT_DM_literal@\.Network\.ProvisionedDPP\."';
+
+// NEW:
+    on event "dm:object-changed" call event_provisioned_dpp_changed
+        filter 'object matches "@DATAELEMENTS_ROOT_DM_literal@\.Network\.ProvisionedDPP\." && contains("parameters.DPPURI")';
+
+    on event "dm:instance-removed" call event_provisioned_dpp_removed
+        filter 'object matches "@DATAELEMENTS_ROOT_DM_literal@\.Network\.ProvisionedDPP\."';
+
+// Add event_provisioned_dpp_removed handler in on_action.cpp get_events_list():
+    {"event_provisioned_dpp_removed", event_provisioned_dpp_removed}
+
+
+===========================================================================
+SUMMARY OF ALL CHANGES
+===========================================================================
+
+db.h:
+  - struct sDppBootstrappingInfo: typedef→struct, add alias field
+  - dpp_bootstrapping_map: move to private
+  - Public methods: dpp_uri_parse, add_dpp_bootstrapping_info,
+                    remove_dpp_bootstrapping_info, get_dpp_info_by_mac,
+                    calculate_dpp_bootstrapping_str (static)
+  - Remove: get_dpp_bootstrapping_map
+
+db.cpp:
+  - calculate_dpp_bootstrapping_str: takes struct ref, fix MAC bug, fix ";;" suffix
+  - add: add_dpp_bootstrapping_info, get_dpp_info_by_mac, remove_dpp_bootstrapping_info
+  - Remove: get_dpp_bootstrapping_map
+
+controller_ucc_listener.cpp:
+  - Replace direct map access with add_dpp_bootstrapping_info()
+
+vbss_actions.cpp:
+  - calculate_dpp_bootstrapping_str: lookup by MAC first, pass struct
+
+on_action.cpp:
+  - "DPP_URI" → "DPPURI" to match ODL
+  - Add event_provisioned_dpp_removed handler + registration
+
+controller.odl.in:
+  - Add contains("parameters.DPPURI") to filter
+  - Add dm:instance-removed event binding
