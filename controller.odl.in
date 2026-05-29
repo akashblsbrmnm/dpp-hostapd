@@ -1,0 +1,24 @@
+// ============================================================
+// controller.odl.in
+// ============================================================
+
+// SECTION 1 — ProvisionedDPP object inside Network {}
+// No change needed — already correct in your patch:
+
+                    /* DPP Provisioning */
+                    object ProvisionedDPP[] {
+                        counted with ProvisionedDPPNumberOfEntries;
+                        %persistent string Alias = "";
+                        %persistent string DPPURI = "";
+                    }
+
+// ============================================================
+// SECTION 2 — %populate block
+// REPLACE your existing DPP event line WITH these two:
+// ============================================================
+
+    on event "dm:object-changed" call event_provisioned_dpp_changed
+        filter 'object matches "@DATAELEMENTS_ROOT_DM_literal@\.Network\.ProvisionedDPP\." && contains("parameters.DPPURI")';
+
+    on event "dm:instance-removed" call event_provisioned_dpp_removed
+        filter 'object matches "@DATAELEMENTS_ROOT_DM_literal@\.Network\.ProvisionedDPP\."';
