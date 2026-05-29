@@ -9,15 +9,6 @@ bool controller_ucc_listener::handle_dev_exec_action(
             return false;
         }
 
-        // Extract alias — mandatory for map keying
-        auto alias_it = params.find("alias");
-        if (alias_it == params.end() || alias_it->second.empty()) {
-            err_string = "DPP alias is missing or empty";
-            return false;
-        }
-        const std::string &alias = alias_it->second;
-
-        // Extract bootstrapping data
         auto dpp_bootstrapping_data_bytes_it = params.find("dppbootstrappingdata");
         if (dpp_bootstrapping_data_bytes_it == params.end()) {
             err_string = "DPPBootstrappingData is missing";
@@ -29,12 +20,26 @@ bool controller_ucc_listener::handle_dev_exec_action(
             beerocks::string_utils::bytes_string_to_string(
                 dpp_bootstrapping_data_bytes_it->second);
 
-        LOG(DEBUG) << "alias: " << alias;
-        LOG(DEBUG) << "bootstrapping data decoded to DPP URI: " << dpp_uri;
+        // Extract alias — generate cpe- prefix if not provided
+        std::string alias;
+        auto alias_it = params.find("alias");
+        if (alias_it != params.end() && !alias_it->second.empty()) {
+            alias = alias_it->second;
+        } else {
+            // Auto-generate — will be based on MAC extracted inside dpp_uri_parse
+            // For now derive from dpp_uri directly using public key prefix
+            // since MAC may not always be present
+            alias = "cpe-" + dpp_uri.substr(0,
+                        std::min<size_t>(12, dpp_uri.size()));
+            LOG(DEBUG) << "No alias provided, auto-generated: " << alias;
+        }
 
-        // Delegate entirely to dpp_uri_parse — no duplicate logic
+        LOG(DEBUG) << "alias: " << alias;
+        LOG(DEBUG) << "dpp_uri: " << dpp_uri;
+
+        // Delegate all parsing, validation and map storage to dpp_uri_parse
         if (!m_database.dpp_uri_parse(alias, dpp_uri)) {
-            err_string = "Failed to parse DPP URI for alias: " + alias;
+            err_string = "Failed to parse and store DPP URI for alias: " + alias;
             return false;
         }
 
@@ -44,68 +49,3 @@ bool controller_ucc_listener::handle_dev_exec_action(
     err_string = "command is not supported on the Controller";
     return false;
 }
-
-UCC Test Harness sends:
-    DPPActionType     = SetPeerBootstrap
-    Alias             = cpe-001            ← just add this
-    DPPBootstrappingData = <hex bytes>
-
-        │
-        ▼
-handle_dev_exec_action()
-    1. Validate action type
-    2. Extract alias         ← now explicit, no generation needed
-    3. Decode hex → DPP URI
-    4. Call dpp_uri_parse(alias, dpp_uri)
-        │
-        ▼
-dpp_uri_parse()              ← single parser for both paths
-    1. Parse URI fields
-    2. Store in dpp_bootstrapping_map[alias]
-
-        │
-        ▼
-ACS/ProvisionedDPP path also calls dpp_uri_parse(alias, dpp_uri)
-*----------*/
-Path 1 — Production (ACS/Configurator)
-    Sets Device.WiFi.DataElements.Network.ProvisionedDPP.{i}.Alias
-                                                         .{i}.DPPURI
-    via TR-181 NBAPI
-
-Path 2 — Certification Testing (WFA Test Harness)
-    Sends DEV_EXEC_ACTION / SetPeerBootstrap
-    with raw DPP bootstrapping bytes
-    via UCC socket command
-
-*+-----------+*
-The Problem We Found
-The original code had a single struct instance in db.h:
-This means only one enrollee could be stored at a time — any new bootstrapping info would silently overwrite the previous one. In a real EasyMesh network with multiple enrollees, this is a bug.
-What We Changed and Why
-1. Single struct → Map
-We replaced the single instance with a map keyed by alias, so multiple enrollees can be stored simultaneously.
-2. Single parser for both paths
-Both paths deliver the same data — a DPP URI string. So we have one shared parser dpp_uri_parse() that both paths call. No duplicated logic.
-3. Alias handling
-ACS path — alias comes from ACS, TR-181 compliant, trusted as-is
-UCC path — we simply require alias as an additional parameter in the UCC payload. The test harness can trivially provide it since it's a flexible key-value command
-
-
-  *-------*
-  ACS sets ProvisionedDPP.{i}.Alias + DPPURI
-            │
-            ▼
-    event_provisioned_dpp_changed()
-            │
-            ▼
-    dpp_uri_parse(alias, dpp_uri) ←────────────────┐
-            │                                       │
-            ▼                              same function
-    dpp_bootstrapping_map[alias]           both paths
-            ▲                                       │
-            │                                       │
-    dpp_uri_parse(alias, dpp_uri) ─────────────────┘
-            │
-    handle_dev_exec_action()
-            │
-UCC sends alias + raw bytes
