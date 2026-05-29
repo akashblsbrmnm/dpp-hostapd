@@ -14,34 +14,199 @@ bool controller_ucc_listener::handle_dev_exec_action(
             err_string = "DPPBootstrappingData is missing";
             return false;
         }
+        auto &dpp_bootstrapping_data_bytes = dpp_bootstrapping_data_bytes_it->second;
 
-        // Decode hex bytes to DPP URI string
-        auto dpp_uri =
-            beerocks::string_utils::bytes_string_to_string(
-                dpp_bootstrapping_data_bytes_it->second);
+        auto dpp_bootstrapping_data_str =
+            beerocks::string_utils::bytes_string_to_string(dpp_bootstrapping_data_bytes);
 
-        // Extract alias — generate cpe- prefix if not provided
+        LOG(DEBUG) << "bootstrapping data: " << dpp_bootstrapping_data_str;
+
+        // dpp_bootstrapping_data is now look like that:
+        // e.g. DPP:V:2;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADezecPyVDIgJVgdGBHGBdxRxGpNU7x9cHFBE=;;
+        // Need to parse it according to this rules:
+        //  DPP:
+        //  [C:<channel/opClass>,...;]                                                # Channel list
+        //  [M:<mac(e.g. aabbccddeeff);]                                              # MAC
+        //  [I:<any sequence of printable character except ';', no length limit>;]    # Information
+        //  [V:<at least 1 (ALPHA / DIGIT) character (e.g "1", "2", etc>;]            # Version
+        //  [H:<1-255 characters of (DIGIT / ALPHA / "." / "-" / ":")>;]              # Host
+        //  [<Any sequence of characters which is not one of
+        //    ("C", "M", "I", "V", "H", "K")>:
+        //    <any sequence of printable character except ';', no length limit>;]     # Reserve
+        //  K:<any sequence of (ALPHA / DIGIT / '+' / '/' / '=') , no length limit>;; # Public key
+
+        // TR-181 DPPURI length validation :2048
+        if (dpp_bootstrapping_data_str.size() > 2048) {
+            err_string = "DPP URI exceeds maximum length of 2048 characters";
+            return false;
+        }
+
+        constexpr char dpp_str[]    = "DPP:";
+        constexpr auto dpp_str_size = sizeof(dpp_str) - 1;
+
+        auto found = dpp_bootstrapping_data_str.find(dpp_str, 0, dpp_str_size);
+        if (found == std::string::npos) {
+            err_string = "missing 'DPP:' prefix on bootstrapping data";
+            return false;
+        }
+        dpp_bootstrapping_data_str.erase(0, dpp_str_size);
+
+        constexpr char data_suffix_str[]    = ";;";
+        constexpr auto data_suffix_str_size = sizeof(data_suffix_str) - 1;
+        found = dpp_bootstrapping_data_str.rfind(data_suffix_str, std::string::npos,
+                                                 data_suffix_str_size);
+        if (found == std::string::npos) {
+            err_string = "missing ';;' suffix on bootstrapping data";
+            return false;
+        }
+        dpp_bootstrapping_data_str.erase(dpp_bootstrapping_data_str.size() - data_suffix_str_size,
+                                         data_suffix_str_size);
+
+        auto bootstrapping_data_elements = string_utils::str_split(dpp_bootstrapping_data_str, ';');
+
+        // Build local struct — only insert into map once fully parsed
+        son::db::sDppBootstrappingInfo enrollee_bootstrapping_info;
+
+        enum eDppInfoType { CHANNEL, MAC, INFORMATION, VERSION, HOST, PUBLIC_KEY, RESERVE };
+        static std::unordered_map<std::string, eDppInfoType> const dpp_info_conversion = {
+            {"C", eDppInfoType::CHANNEL},     {"M", eDppInfoType::MAC},
+            {"I", eDppInfoType::INFORMATION}, {"V", eDppInfoType::VERSION},
+            {"H", eDppInfoType::HOST},        {"K", eDppInfoType::PUBLIC_KEY}};
+
+        constexpr char general_parsing_error[] = "Failed to parse bootstrapping info";
+
+        for (const auto &element : bootstrapping_data_elements) {
+            // element = <X>:<"X info">
+            auto bootstrapping_data_info = string_utils::str_split(element, ':');
+            if (bootstrapping_data_info.size() != 2) {
+                err_string.assign(general_parsing_error);
+                return false;
+            }
+
+            auto info_letter_it = dpp_info_conversion.find(bootstrapping_data_info[0]);
+            if (info_letter_it == dpp_info_conversion.end()) {
+                LOG(WARNING) << "Failed to detect bootstrapping info key: "
+                             << bootstrapping_data_info[0];
+                continue;
+            }
+
+            auto &data = bootstrapping_data_info[1];
+
+            switch (info_letter_it->second) {
+            case eDppInfoType::CHANNEL: {
+                auto operating_class_channel_pairs = string_utils::str_split(data, ',');
+                for (const auto &pair : operating_class_channel_pairs) {
+                    auto operating_class_channel_pair_vec = string_utils::str_split(pair, '/');
+                    if (operating_class_channel_pair_vec.size() != 2) {
+                        err_string.assign(general_parsing_error);
+                        return false;
+                    }
+                    enrollee_bootstrapping_info.operating_class_channel.emplace(
+                        string_utils::stoi(operating_class_channel_pair_vec[0]),
+                        string_utils::stoi(operating_class_channel_pair_vec[1]));
+                }
+                break;
+            }
+            case eDppInfoType::MAC: {
+                enrollee_bootstrapping_info.mac = tlvf::mac_from_string(data);
+                break;
+            }
+            case eDppInfoType::INFORMATION: {
+                enrollee_bootstrapping_info.info = data;
+                break;
+            }
+            case eDppInfoType::VERSION: {
+                enrollee_bootstrapping_info.version = string_utils::stoi(data);
+                break;
+            }
+            case eDppInfoType::HOST: {
+                enrollee_bootstrapping_info.host = data;
+                break;
+            }
+            case eDppInfoType::PUBLIC_KEY: {
+                enrollee_bootstrapping_info.public_key = data;
+                break;
+            }
+            default: {
+                break;
+            }
+            }
+        }
+
+        // Validate mandatory public key field
+        if (enrollee_bootstrapping_info.public_key.empty()) {
+            err_string = "DPP bootstrapping data missing mandatory K (public key) field";
+            return false;
+        }
+
+        // Extract alias — generate cpe- prefix if not provided or empty
         std::string alias;
         auto alias_it = params.find("alias");
         if (alias_it != params.end() && !alias_it->second.empty()) {
             alias = alias_it->second;
+            LOG(DEBUG) << "Using provided alias: " << alias;
         } else {
-            // Auto-generate — will be based on MAC extracted inside dpp_uri_parse
-            // For now derive from dpp_uri directly using public key prefix
-            // since MAC may not always be present
-            alias = "cpe-" + dpp_uri.substr(0,
-                        std::min<size_t>(12, dpp_uri.size()));
-            LOG(DEBUG) << "No alias provided, auto-generated: " << alias;
+            // Auto-generate alias with cpe- prefix (TR-181: CPE-generated MUST start with cpe-)
+            std::string mac_str = tlvf::mac_to_string(enrollee_bootstrapping_info.mac);
+            if (!mac_str.empty() && mac_str != "00:00:00:00:00:00") {
+                std::string mac_clean;
+                for (char c : mac_str) {
+                    if (c != ':') mac_clean += c;
+                }
+                alias = "cpe-" + mac_clean;
+            } else {
+                alias = "cpe-" + enrollee_bootstrapping_info.public_key.substr(
+                    0, std::min<size_t>(12, enrollee_bootstrapping_info.public_key.size()));
+            }
+            LOG(DEBUG) << "Auto-generated alias: " << alias;
         }
 
-        LOG(DEBUG) << "alias: " << alias;
-        LOG(DEBUG) << "dpp_uri: " << dpp_uri;
-
-        // Delegate all parsing, validation and map storage to dpp_uri_parse
-        if (!m_database.dpp_uri_parse(alias, dpp_uri)) {
-            err_string = "Failed to parse and store DPP URI for alias: " + alias;
+        // TR-181 alias length validation :64
+        if (alias.size() > 64) {
+            err_string = "Alias exceeds maximum length of 64 characters";
             return false;
         }
+
+        enrollee_bootstrapping_info.alias = alias;
+
+        // Log all parsed fields
+        std::string channels_str;
+        for (auto &ch : enrollee_bootstrapping_info.operating_class_channel) {
+            channels_str += std::to_string(ch.first) + "\\" + std::to_string(ch.second) + ",";
+        }
+        LOG(DEBUG) << "alias:"      << alias;
+        LOG(DEBUG) << "channel:"    << channels_str;
+        LOG(DEBUG) << "mac:"        << enrollee_bootstrapping_info.mac;
+        LOG(DEBUG) << "info:"       << enrollee_bootstrapping_info.info;
+        LOG(DEBUG) << "version:"    << (int)enrollee_bootstrapping_info.version;
+        LOG(DEBUG) << "host:"       << enrollee_bootstrapping_info.host;
+        LOG(DEBUG) << "public_key:" << enrollee_bootstrapping_info.public_key;
+
+        // Conflict detection before inserting into map
+        auto it = m_database.dpp_bootstrapping_map.find(alias);
+        if (it != m_database.dpp_bootstrapping_map.end()) {
+            if (it->second.public_key != enrollee_bootstrapping_info.public_key) {
+                // Same alias, different enrollee — reject
+                err_string = "Alias '" + alias + "' already exists for a different enrollee";
+                return false;
+            }
+            // Same alias, same enrollee — allow overwrite (e.g. channel refresh)
+            LOG(WARNING) << "Alias '" << alias
+                         << "' already exists for same enrollee — overwriting";
+        } else {
+            // Warn if same enrollee stored under different alias
+            for (const auto &entry : m_database.dpp_bootstrapping_map) {
+                if (entry.second.public_key == enrollee_bootstrapping_info.public_key) {
+                    LOG(WARNING) << "Same enrollee already stored under alias '"
+                                 << entry.first << "', now also under '" << alias << "'";
+                    break;
+                }
+            }
+        }
+
+        m_database.dpp_bootstrapping_map[alias] = std::move(enrollee_bootstrapping_info);
+        LOG(DEBUG) << "Stored DPP bootstrapping info for alias: " << alias
+                   << ", total entries: " << m_database.dpp_bootstrapping_map.size();
 
         return true;
     }
@@ -49,3 +214,175 @@ bool controller_ucc_listener::handle_dev_exec_action(
     err_string = "command is not supported on the Controller";
     return false;
 }
+
+
+
+bool db::dpp_uri_parse_and_store(const std::string &alias, const std::string &dpp_uri)
+{
+    LOG(DEBUG) << "dpp_uri_parse_and_store called with alias: '"
+               << alias << "', dpp_uri: '" << dpp_uri << "'";
+
+    // TR-181 length validations
+    if (alias.empty()) {
+        LOG(ERROR) << "Alias must not be empty";
+        return false;
+    }
+    if (alias.size() > 64) {
+        LOG(ERROR) << "Alias '" << alias << "' exceeds maximum length of 64 characters"
+                   << " (actual: " << alias.size() << ")";
+        return false;
+    }
+    if (dpp_uri.size() > 2048) {
+        LOG(ERROR) << "DPPURI exceeds maximum length of 2048 characters"
+                   << " (actual: " << dpp_uri.size() << ")";
+        return false;
+    }
+
+    // Validate DPP URI prefix
+    const std::string prefix = "DPP:";
+    if (dpp_uri.compare(0, prefix.size(), prefix) != 0) {
+        LOG(ERROR) << "Invalid DPP URI prefix, expected 'DPP:'";
+        return false;
+    }
+
+    // Validate DPP URI suffix
+    const std::string suffix = ";;";
+    if (dpp_uri.size() < suffix.size() ||
+        dpp_uri.compare(dpp_uri.size() - suffix.size(), suffix.size(), suffix) != 0) {
+        LOG(ERROR) << "Invalid DPP URI suffix, expected ';;'";
+        return false;
+    }
+
+    // Strip prefix and suffix
+    std::string body = dpp_uri.substr(prefix.size(),
+                           dpp_uri.size() - prefix.size() - suffix.size());
+    LOG(DEBUG) << "DPP URI body after strip: '" << body << "'";
+
+    son::db::sDppBootstrappingInfo dpp_bootstrap_info;
+    dpp_bootstrap_info.alias = alias;
+
+    std::stringstream ss(body);
+    std::string token;
+    while (std::getline(ss, token, ';')) {
+        if (token.empty()) {
+            LOG(DEBUG) << "Empty token skipped";
+            continue;
+        }
+
+        LOG(DEBUG) << "Processing token: '" << token << "'";
+
+        auto sep = token.find(':');
+        if (sep == std::string::npos) {
+            LOG(WARNING) << "Token missing ':' separator, skipping: '" << token << "'";
+            continue;
+        }
+
+        std::string key = token.substr(0, sep);
+        std::string val = token.substr(sep + 1);
+        LOG(DEBUG) << "Parsed key: '" << key << "', val: '" << val << "'";
+
+        if (key == "C") {
+            std::stringstream cs(val);
+            std::string entry;
+            while (std::getline(cs, entry, ',')) {
+                auto slash = entry.find('/');
+                if (slash == std::string::npos) {
+                    LOG(WARNING) << "Channel entry missing '/', skipping: '" << entry << "'";
+                    continue;
+                }
+                try {
+                    uint8_t op_class = static_cast<uint8_t>(std::stoi(entry.substr(0, slash)));
+                    uint8_t channel  = static_cast<uint8_t>(std::stoi(entry.substr(slash + 1)));
+                    dpp_bootstrap_info.operating_class_channel.emplace(op_class, channel);
+                    LOG(DEBUG) << "Added op_class: " << (int)op_class
+                               << ", channel: " << (int)channel;
+                } catch (const std::exception &e) {
+                    LOG(ERROR) << "Exception parsing C field entry '" << entry
+                               << "': " << e.what();
+                }
+            }
+        } else if (key == "M") {
+            std::string mac_with_colons;
+            for (size_t i = 0; i < val.size(); i += 2) {
+                if (i > 0) mac_with_colons += ':';
+                mac_with_colons += val.substr(i, 2);
+            }
+            dpp_bootstrap_info.mac = tlvf::mac_from_string(mac_with_colons);
+            LOG(DEBUG) << "Parsed MAC: " << dpp_bootstrap_info.mac;
+        } else if (key == "I") {
+            dpp_bootstrap_info.info = val;
+            LOG(DEBUG) << "Parsed info: '" << dpp_bootstrap_info.info << "'";
+        } else if (key == "V") {
+            try {
+                dpp_bootstrap_info.version = static_cast<uint8_t>(std::stoi(val));
+                LOG(DEBUG) << "Parsed version: " << (int)dpp_bootstrap_info.version;
+            } catch (const std::exception &e) {
+                LOG(ERROR) << "Exception parsing V field '" << val << "': " << e.what();
+            }
+        } else if (key == "H") {
+            dpp_bootstrap_info.host = val;
+            LOG(DEBUG) << "Parsed host: '" << dpp_bootstrap_info.host << "'";
+        } else if (key == "K") {
+            dpp_bootstrap_info.public_key = val;
+            LOG(DEBUG) << "Parsed public_key length: "
+                       << dpp_bootstrap_info.public_key.size() << " chars";
+        } else {
+            LOG(DEBUG) << "Unknown key '" << key << "' ignored";
+        }
+    }
+
+    // Validate mandatory public key field
+    if (dpp_bootstrap_info.public_key.empty()) {
+        LOG(ERROR) << "DPP URI missing mandatory K (public key) for alias: " << alias;
+        return false;
+    }
+
+    // Conflict detection before inserting into map
+    auto it = dpp_bootstrapping_map.find(alias);
+    if (it != dpp_bootstrapping_map.end()) {
+        if (it->second.public_key != dpp_bootstrap_info.public_key) {
+            // Same alias, different enrollee — reject
+            LOG(ERROR) << "Alias '" << alias
+                       << "' already exists for a different enrollee — rejecting";
+            return false;
+        }
+        // Same alias, same enrollee — allow overwrite
+        LOG(WARNING) << "Alias '" << alias
+                     << "' already exists for same enrollee — overwriting";
+    } else {
+        // Warn if same enrollee already stored under different alias
+        for (const auto &entry : dpp_bootstrapping_map) {
+            if (entry.second.public_key == dpp_bootstrap_info.public_key) {
+                LOG(WARNING) << "Same enrollee already stored under alias '"
+                             << entry.first << "', now also under '" << alias << "'";
+                break;
+            }
+        }
+        LOG(DEBUG) << "Inserting new DPP entry for alias: " << alias
+                   << ", total entries: " << (dpp_bootstrapping_map.size() + 1);
+    }
+
+    dpp_bootstrapping_map[alias] = std::move(dpp_bootstrap_info);
+    LOG(DEBUG) << "Stored DPP entry for alias: " << alias
+               << ", total entries: " << dpp_bootstrapping_map.size();
+
+    return true;
+}
+
+// Change from private struct instance to public map
+// REMOVE this from wherever it was declared:
+// } dpp_bootstrapping_info;
+
+// Change typedef to include alias field
+typedef struct {
+    std::string alias;
+    std::multimap<uint8_t, uint8_t> operating_class_channel;
+    sMacAddr mac;
+    std::string info;
+    uint8_t version = 0;
+    std::string host;
+    std::string public_key;
+} sDppBootstrappingInfo;
+
+// In public section:
+std::unordered_map<std::string, sDppBootstrappingInfo> dpp_bootstrapping_map;
