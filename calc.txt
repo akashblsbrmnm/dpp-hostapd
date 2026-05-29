@@ -1,0 +1,84 @@
+std::string db::calculate_dpp_bootstrapping_str(const std::string &alias)
+{
+    // Look up enrollee by alias
+    auto it = dpp_bootstrapping_map.find(alias);
+    if (it == dpp_bootstrapping_map.end()) {
+        LOG(ERROR) << "No DPP bootstrapping info found for alias: " << alias;
+        return "";
+    }
+
+    const auto &dpp_bootstrapping_info = it->second;
+
+    std::string dpp_conn_string = "";
+    std::string opclass_channel_str;
+    for (const auto &ch : dpp_bootstrapping_info.operating_class_channel) {
+        opclass_channel_str += std::to_string(ch.first) + "/" + std::to_string(ch.second) + ",";
+    }
+    if (!opclass_channel_str.empty()) {
+        opclass_channel_str.pop_back();
+        dpp_conn_string += "C:" + opclass_channel_str + ";";
+    }
+
+    if (dpp_bootstrapping_info.mac != net::network_utils::ZERO_MAC) {
+        std::string mac_string = tlvf::mac_to_string(dpp_bootstrapping_info.mac);
+        mac_string.erase(std::remove_if(mac_string.begin(), mac_string.end(),
+                                        [](const char &c) { return c == ':'; }),
+                         mac_string.end());
+        dpp_conn_string += "M:" + mac_string + ";";
+    }
+
+    if (!dpp_bootstrapping_info.info.empty())
+        dpp_conn_string += "I:" + dpp_bootstrapping_info.info + ";";
+
+    if (dpp_bootstrapping_info.version != 0)
+        dpp_conn_string += "V:" + std::to_string(dpp_bootstrapping_info.version) + ";";
+
+    if (!dpp_bootstrapping_info.host.empty())
+        dpp_conn_string += "H:" + dpp_bootstrapping_info.host + ";";
+
+    if (!dpp_bootstrapping_info.public_key.empty())
+        dpp_conn_string += "K:" + dpp_bootstrapping_info.public_key + ";";
+
+    if (dpp_conn_string.empty()) {
+        return "";
+    }
+
+    return "DPP:" + dpp_conn_string + ";";
+}
+
+std::string calculate_dpp_bootstrapping_str(const std::string &alias);
+
+
+// wherever calculate_dpp_bootstrapping_str() is called:
+auto dpp_str = m_database.calculate_dpp_bootstrapping_str(alias);
+
+
+// C field parsing
+try {
+    uint8_t op_class = static_cast<uint8_t>(std::stoi(entry.substr(0, slash)));
+    uint8_t channel  = static_cast<uint8_t>(std::stoi(entry.substr(slash + 1)));
+    dpp_bootstrap_info.operating_class_channel.emplace(op_class, channel);
+    LOG(DEBUG) << "Added op_class: " << (int)op_class
+               << ", channel: " << (int)channel;
+} catch (const std::exception &e) {    // ← consistent name
+    LOG(ERROR) << "Exception parsing C field entry '"
+               << entry << "': " << e.what();
+}
+
+// V field parsing
+try {
+    dpp_bootstrap_info.version = static_cast<uint8_t>(std::stoi(val));
+    LOG(DEBUG) << "Parsed version: " << (int)dpp_bootstrap_info.version;
+} catch (const std::exception &e) {    // ← consistent name
+    LOG(ERROR) << "Exception parsing V field '"
+               << val << "': " << e.what();
+}
+
+
+// ORIGINAL — buggy, removes everything it finds in mac_string
+[&mac_string](const char &c) {
+    return mac_string.find(c) != std::string::npos;
+}
+
+// FIXED — only removes colons
+[](const char &c) { return c == ':'; }
