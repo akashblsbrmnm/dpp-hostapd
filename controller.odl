@@ -1,21 +1,26 @@
-// controller.odl.in — ProvisionedDPP object with commit function
+// ============================================================
+// controller.odl.in — ProvisionedDPP object inside Network {}
+// ============================================================
 
-                    /* DPP Provisioning */
+                    /* DPP Provisioning — TR-181 v2.19
+                     * Device.WiFi.DataElements.Network.ProvisionedDPP.{i}
+                     * Holds DPP Bootstrap URIs for Multi-AP agent onboarding. */
                     object ProvisionedDPP[] {
                         counted with ProvisionedDPPNumberOfEntries;
-                        %persistent string Alias = "";
-                        %persistent string DPP_URI = "";
+                        %persistent string Alias {
+                            on action validate call check_maximum_length 64;
+                        }
+                        %persistent string DPPURI {
+                            on action validate call check_maximum_length 2048;
+                        }
                     }
 
-                    void ProvisionedDPPCommit();
+// ============================================================
+// %populate section — add after event_network_group_changed
+// ============================================================
 
-// %populate section — remove event_provisioned_dpp_changed, not needed anymore
-// REMOVE these two lines:
-//
-//    on event "dm:object-changed" call event_provisioned_dpp_changed
-//        filter 'object matches "...Network\.ProvisionedDPP\."';
-//
-// KEEP dm:instance-removed for cleanup:
+    on event "dm:object-changed" call event_provisioned_dpp_changed
+        filter 'object matches "@DATAELEMENTS_ROOT_DM_literal@\.Network\.ProvisionedDPP\." && contains("parameters.DPPURI")';
 
     on event "dm:instance-removed" call event_provisioned_dpp_removed
         filter 'object matches "@DATAELEMENTS_ROOT_DM_literal@\.Network\.ProvisionedDPP\."';
