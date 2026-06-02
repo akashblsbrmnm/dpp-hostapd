@@ -1,0 +1,114 @@
+static const std::string kAliasKey{"alias"};
+auto alias_it = params.find(kAliasKey);
+
+INFORMATION
+Current:
+C++
+} else if (key == "I") {
+    dpp_info.info = val;
+    LOG(INFO) << "Parsed info: '" << dpp_info.info << "'";
+}
+Fix:
+C++
+} else if (key == "I") {
+    dpp_info.info = std::move(val);
+    LOG(INFO) << "Parsed info: '" << dpp_info.info << "'";
+}
+HOST
+Current:
+C++
+} else if (key == "H") {
+    dpp_info.host = val;
+    LOG(INFO) << "Parsed host: '" << dpp_info.host << "'";
+}
+Fix:
+C++
+} else if (key == "H") {
+    dpp_info.host = std::move(val);
+    LOG(INFO) << "Parsed host: '" << dpp_info.host << "'";
+}
+PUBLIC_KEY
+Current:
+C++
+} else if (key == "K") {
+    dpp_info.public_key = val;
+    LOG(INFO) << "Parsed public_key length: "
+              << dpp_info.public_key.size() << " chars";
+}
+Fix:
+C++
+} else if (key == "K") {
+    dpp_info.public_key = std::move(val);
+    LOG(INFO) << "Parsed public_key length: "
+              << dpp_info.public_key.size() << " chars";
+}
+
+don't do this:
+dpp_info.info = std::move(val);
+LOG(INFO) << val;
+
+
+coding style 
+
+// WRONG — in db.h
+typedef struct {
+    ...
+} sDppBootstrappingInfo;
+
+// CORRECT
+struct sDppBootstrappingInfo {
+    std::string alias;
+    std::multimap<uint8_t, uint8_t> operating_class_channel;
+    sMacAddr mac;
+    std::string info;
+    uint8_t version = 0;
+    std::string host;
+    std::string public_key;
+};
+
+// WRONG
+void db::add_dpp_bootstrapping_info(const std::string &alias, sDppBootstrappingInfo info)
+
+// CORRECT — struct > 32 bits so pass by const-ref
+void db::add_dpp_bootstrapping_info(const std::string &alias, const sDppBootstrappingInfo &info)
+
+// WRONG — in vbss_actions.cpp
+if (dpp_info) {
+    vbss_creation_req->set_dpp_connector(database.calculate_dpp_bootstrapping_str(*dpp_info));
+}
+else {
+    LOG(DEBUG) << "...";
+}
+
+// CORRECT — else goes on same line as closing brace
+if (dpp_info) {
+    vbss_creation_req->set_dpp_connector(database.calculate_dpp_bootstrapping_str(*dpp_info));
+} else {
+    LOG(DEBUG) << "No DPP bootstrapping info found for client MAC: "
+               << client_vbss.client_mac << ", skipping DPP connector";
+}
+
+// WRONG
+if (!alias || alias[0] == '\0') {
+
+// This is fine actually — but for pointer checks elsewhere use:
+if (!dpp_obj)   // CORRECT
+if (dpp_obj == nullptr)  // WRONG per Klocwork guideline
+
+// WRONG — states the obvious
+LOG(INFO) << "ProvisionedDPP object retrieved successfully";
+LOG(INFO) << "Empty token skipped";
+
+// These logs are fine as logs, but inline code comments should explain WHY not WHAT
+
+// WRONG
+for (char c : mac_str) {
+    if (c != ':') mac_clean += c;  // missing curly braces
+}
+
+// CORRECT
+for (char c : mac_str) {
+    if (c != ':') {
+        mac_clean += c;
+    }
+}
