@@ -1,34 +1,32 @@
 // ============================================================
-// controller_ucc_listener.cpp
+// controller_ucc_listener.cpp — changes in handle_dev_exec_action
 // ============================================================
 
-// SECTION 1 — around line 213, REMOVE this line:
-//   auto &enrollee_bootstrapping_info = m_database.dpp_bootstrapping_info;
-//
-// ADD before the switch block (declare local struct):
+// Coding style fixes applied:
+//   - Coverity CID-30370: static const std::string for map lookup key
+//   - curly braces on all single-line conditionals
+//   - else on same line as closing brace
+//   - if (!ptr) style
+//   - alias moved into add_dpp_bootstrapping_info (not used after)
+
+        // Local struct built here; stored in db only after full validation
         son::db::sDppBootstrappingInfo enrollee_bootstrapping_info;
 
-// The switch block that fills enrollee_bootstrapping_info stays unchanged.
-
-// ============================================================
-// SECTION 2 — REPLACE the block after the switch/for loop
-// ============================================================
-
-// REMOVE (old logging + direct map access):
-//        for (auto &ch : m_database.dpp_bootstrapping_info.operating_class_channel) {
-//        LOG(DEBUG) << "mac:" << m_database.dpp_bootstrapping_info.mac;
-//        ... etc
-//        m_database.dpp_bootstrapping_map[alias] = std::move(enrollee_bootstrapping_info);
-
-// REPLACE WITH:
+        // ... existing switch/parse loop unchanged ...
 
         if (enrollee_bootstrapping_info.public_key.empty()) {
             err_string = "DPP bootstrapping data missing mandatory K (public key) field";
             return false;
         }
 
+        // Determine alias: use provided value or auto-generate from MAC/public key.
+        // TR-181: CPE-generated aliases MUST start with "cpe-" prefix.
         std::string alias;
-        auto alias_it = params.find("alias");
+
+        // Coverity CID-30370: use static const string to avoid temporary construction
+        static const std::string kAliasKey = "alias";
+        auto alias_it = params.find(kAliasKey);
+
         if (alias_it != params.end() && !alias_it->second.empty()) {
             alias = alias_it->second;
         } else {
@@ -36,7 +34,9 @@
             if (!mac_str.empty() && mac_str != "00:00:00:00:00:00") {
                 std::string mac_clean;
                 for (char c : mac_str) {
-                    if (c != ':') mac_clean += c;
+                    if (c != ':') {
+                        mac_clean += c;
+                    }
                 }
                 alias = "cpe-" + mac_clean;
             } else {
@@ -45,20 +45,22 @@
             }
             LOG(DEBUG) << "Auto-generated alias: " << alias;
         }
+
         enrollee_bootstrapping_info.alias = alias;
 
         std::string channels_str;
-        for (auto &ch : enrollee_bootstrapping_info.operating_class_channel) {
-            channels_str += std::to_string(ch.first) + "\\" + std::to_string(ch.second) + ",";
+        for (const auto &ch : enrollee_bootstrapping_info.operating_class_channel) {
+            channels_str +=
+                std::to_string(ch.first) + "\\" + std::to_string(ch.second) + ",";
         }
         LOG(DEBUG) << "alias:"      << alias;
         LOG(DEBUG) << "channel:"    << channels_str;
         LOG(DEBUG) << "mac:"        << enrollee_bootstrapping_info.mac;
         LOG(DEBUG) << "info:"       << enrollee_bootstrapping_info.info;
-        LOG(DEBUG) << "version:"    << (int)enrollee_bootstrapping_info.version;
+        LOG(DEBUG) << "version:"    << static_cast<int>(enrollee_bootstrapping_info.version);
         LOG(DEBUG) << "host:"       << enrollee_bootstrapping_info.host;
         LOG(DEBUG) << "public_key:" << enrollee_bootstrapping_info.public_key;
 
-        m_database.add_dpp_bootstrapping_info(alias, std::move(enrollee_bootstrapping_info));
+        m_database.add_dpp_bootstrapping_info(alias, enrollee_bootstrapping_info);
 
         return true;
