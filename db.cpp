@@ -1,6 +1,17 @@
 // ============================================================
-// db.cpp — REPLACE calculate_dpp_bootstrapping_str entirely
+// db.cpp — REPLACE calculate_dpp_bootstrapping_str
+//          ADD dpp_uri_parse, add_dpp_bootstrapping_info,
+//              get_dpp_info_by_mac, remove_dpp_bootstrapping_info
 // ============================================================
+
+// Coding style fixes applied:
+//   - const-ref args for structs > 32 bits
+//   - std::move(val) where val is not used after assignment
+//   - if (!ptr) instead of ptr == nullptr
+//   - curly braces on all conditionals
+//   - else on same line as closing brace
+//   - static const std::string for map lookup keys
+//   - no typedef struct
 
 std::string db::calculate_dpp_bootstrapping_str(const sDppBootstrappingInfo &info)
 {
@@ -8,7 +19,8 @@ std::string db::calculate_dpp_bootstrapping_str(const sDppBootstrappingInfo &inf
     std::string opclass_channel_str;
 
     for (const auto &ch : info.operating_class_channel) {
-        opclass_channel_str += std::to_string(ch.first) + "/" + std::to_string(ch.second) + ",";
+        opclass_channel_str +=
+            std::to_string(ch.first) + "/" + std::to_string(ch.second) + ",";
     }
     if (!opclass_channel_str.empty()) {
         opclass_channel_str.pop_back();
@@ -17,22 +29,27 @@ std::string db::calculate_dpp_bootstrapping_str(const sDppBootstrappingInfo &inf
 
     if (info.mac != net::network_utils::ZERO_MAC) {
         std::string mac_string = tlvf::mac_to_string(info.mac);
+        // Remove colons from MAC string as required by DPP URI format
         mac_string.erase(std::remove(mac_string.begin(), mac_string.end(), ':'),
                          mac_string.end());
         dpp_conn_string += "M:" + mac_string + ";";
     }
 
-    if (!info.info.empty())
+    if (!info.info.empty()) {
         dpp_conn_string += "I:" + info.info + ";";
+    }
 
-    if (info.version != 0)
+    if (info.version != 0) {
         dpp_conn_string += "V:" + std::to_string(info.version) + ";";
+    }
 
-    if (!info.host.empty())
+    if (!info.host.empty()) {
         dpp_conn_string += "H:" + info.host + ";";
+    }
 
-    if (!info.public_key.empty())
+    if (!info.public_key.empty()) {
         dpp_conn_string += "K:" + info.public_key + ";";
+    }
 
     if (dpp_conn_string.empty()) {
         return "";
@@ -41,14 +58,10 @@ std::string db::calculate_dpp_bootstrapping_str(const sDppBootstrappingInfo &inf
     return "DPP:" + dpp_conn_string + ";;";
 }
 
-// ============================================================
-// db.cpp — ADD these new functions at end of file
-// ============================================================
-
 bool db::dpp_uri_parse(const std::string &alias, const std::string &dpp_uri)
 {
-    LOG(DEBUG) << "dpp_uri_parse called with alias: '"
-               << alias << "', dpp_uri: '" << dpp_uri << "'";
+    LOG(INFO) << "dpp_uri_parse called with alias: '"
+              << alias << "', dpp_uri: '" << dpp_uri << "'";
 
     const std::string prefix = "DPP:";
     if (dpp_uri.compare(0, prefix.size(), prefix) != 0) {
@@ -63,9 +76,9 @@ bool db::dpp_uri_parse(const std::string &alias, const std::string &dpp_uri)
         return false;
     }
 
-    std::string body = dpp_uri.substr(prefix.size(),
-                           dpp_uri.size() - prefix.size() - suffix.size());
-    LOG(DEBUG) << "DPP URI body after strip: '" << body << "'";
+    std::string body =
+        dpp_uri.substr(prefix.size(), dpp_uri.size() - prefix.size() - suffix.size());
+    LOG(INFO) << "DPP URI body after strip: '" << body << "'";
 
     sDppBootstrappingInfo dpp_info;
     dpp_info.alias = alias;
@@ -74,11 +87,10 @@ bool db::dpp_uri_parse(const std::string &alias, const std::string &dpp_uri)
     std::string token;
     while (std::getline(ss, token, ';')) {
         if (token.empty()) {
-            LOG(DEBUG) << "Empty token skipped";
             continue;
         }
 
-        LOG(DEBUG) << "Processing token: '" << token << "'";
+        LOG(INFO) << "Processing token: '" << token << "'";
 
         auto sep = token.find(':');
         if (sep == std::string::npos) {
@@ -88,7 +100,7 @@ bool db::dpp_uri_parse(const std::string &alias, const std::string &dpp_uri)
 
         std::string key = token.substr(0, sep);
         std::string val = token.substr(sep + 1);
-        LOG(DEBUG) << "Parsed key: '" << key << "', val: '" << val << "'";
+        LOG(INFO) << "Parsed key: '" << key << "', val: '" << val << "'";
 
         if (key == "C") {
             std::stringstream cs(val);
@@ -99,44 +111,59 @@ bool db::dpp_uri_parse(const std::string &alias, const std::string &dpp_uri)
                     LOG(WARNING) << "Channel entry missing '/', skipping: '" << entry << "'";
                     continue;
                 }
-                try {
-                    uint8_t op_class = static_cast<uint8_t>(std::stoi(entry.substr(0, slash)));
-                    uint8_t channel  = static_cast<uint8_t>(std::stoi(entry.substr(slash + 1)));
-                    dpp_info.operating_class_channel.emplace(op_class, channel);
-                    LOG(DEBUG) << "Added op_class: " << (int)op_class
-                               << ", channel: " << (int)channel;
-                } catch (const std::exception &e) {
-                    LOG(ERROR) << "Exception parsing C field entry '" << entry
-                               << "': " << e.what();
+
+                std::string op_class_str = entry.substr(0, slash);
+                std::string channel_str  = entry.substr(slash + 1);
+
+                bool op_valid = !op_class_str.empty() &&
+                    std::all_of(op_class_str.begin(), op_class_str.end(), ::isdigit);
+                bool ch_valid = !channel_str.empty() &&
+                    std::all_of(channel_str.begin(), channel_str.end(), ::isdigit);
+
+                if (!op_valid || !ch_valid) {
+                    LOG(ERROR) << "Invalid C field entry '" << entry << "'";
+                    continue;
                 }
+
+                uint8_t op_class = static_cast<uint8_t>(std::stoi(op_class_str));
+                uint8_t channel  = static_cast<uint8_t>(std::stoi(channel_str));
+                dpp_info.operating_class_channel.emplace(op_class, channel);
+                LOG(INFO) << "Added op_class: " << static_cast<int>(op_class)
+                          << ", channel: " << static_cast<int>(channel);
             }
         } else if (key == "M") {
             std::string mac_with_colons;
             for (size_t i = 0; i < val.size(); i += 2) {
-                if (i > 0) mac_with_colons += ':';
+                if (i > 0) {
+                    mac_with_colons += ':';
+                }
                 mac_with_colons += val.substr(i, 2);
             }
             dpp_info.mac = tlvf::mac_from_string(mac_with_colons);
-            LOG(DEBUG) << "Parsed MAC: " << dpp_info.mac;
+            LOG(INFO) << "Parsed MAC: " << dpp_info.mac;
         } else if (key == "I") {
-            dpp_info.info = val;
-            LOG(DEBUG) << "Parsed info: '" << dpp_info.info << "'";
+            // Coverity CID-30887: move val since it is not used after this assignment
+            dpp_info.info = std::move(val);
+            LOG(INFO) << "Parsed info: '" << dpp_info.info << "'";
         } else if (key == "V") {
-            try {
+            bool valid = !val.empty() &&
+                std::all_of(val.begin(), val.end(), ::isdigit);
+            if (!valid) {
+                LOG(ERROR) << "Invalid V field value: '" << val << "'";
+            } else {
                 dpp_info.version = static_cast<uint8_t>(std::stoi(val));
-                LOG(DEBUG) << "Parsed version: " << (int)dpp_info.version;
-            } catch (const std::exception &e) {
-                LOG(ERROR) << "Exception parsing V field '" << val << "': " << e.what();
+                LOG(INFO) << "Parsed version: " << static_cast<int>(dpp_info.version);
             }
         } else if (key == "H") {
-            dpp_info.host = val;
-            LOG(DEBUG) << "Parsed host: '" << dpp_info.host << "'";
+            // Coverity CID-30887: move val since it is not used after this assignment
+            dpp_info.host = std::move(val);
+            LOG(INFO) << "Parsed host: '" << dpp_info.host << "'";
         } else if (key == "K") {
-            dpp_info.public_key = val;
-            LOG(DEBUG) << "Parsed public_key length: "
-                       << dpp_info.public_key.size() << " chars";
+            // Coverity CID-30887: move val since it is not used after this assignment
+            dpp_info.public_key = std::move(val);
+            LOG(INFO) << "Parsed public_key length: " << dpp_info.public_key.size() << " chars";
         } else {
-            LOG(DEBUG) << "Unknown key '" << key << "' ignored";
+            LOG(INFO) << "Unknown key '" << key << "' ignored";
         }
     }
 
@@ -149,19 +176,20 @@ bool db::dpp_uri_parse(const std::string &alias, const std::string &dpp_uri)
     dpp_bootstrapping_map[alias] = std::move(dpp_info);
 
     if (overwrite) {
-        LOG(DEBUG) << "Overwrote existing DPP entry for alias: " << alias
-                   << ", total entries: " << dpp_bootstrapping_map.size();
+        LOG(INFO) << "Overwrote existing DPP entry for alias: " << alias
+                  << ", total entries: " << dpp_bootstrapping_map.size();
     } else {
-        LOG(DEBUG) << "Inserted new DPP entry for alias: " << alias
-                   << ", total entries: " << dpp_bootstrapping_map.size();
+        LOG(INFO) << "Inserted new DPP entry for alias: " << alias
+                  << ", total entries: " << dpp_bootstrapping_map.size();
     }
 
     return true;
 }
 
-void db::add_dpp_bootstrapping_info(const std::string &alias, sDppBootstrappingInfo info)
+void db::add_dpp_bootstrapping_info(const std::string &alias,
+                                    const sDppBootstrappingInfo &info)
 {
-    dpp_bootstrapping_map[alias] = std::move(info);
+    dpp_bootstrapping_map[alias] = info;
     LOG(DEBUG) << "Stored DPP bootstrapping info for alias: " << alias
                << ", total entries: " << dpp_bootstrapping_map.size();
 }
@@ -172,8 +200,6 @@ void db::remove_dpp_bootstrapping_info(const std::string &alias)
     if (it != dpp_bootstrapping_map.end()) {
         dpp_bootstrapping_map.erase(it);
         LOG(DEBUG) << "Removed DPP bootstrapping info for alias: " << alias;
-    } else {
-        LOG(WARNING) << "DPP bootstrapping info not found for alias: " << alias;
     }
 }
 
