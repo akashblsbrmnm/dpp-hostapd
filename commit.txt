@@ -1,133 +1,30 @@
-// In ProvisionedDPP object
-object ProvisionedDPP[] {
-    counted with ProvisionedDPPNumberOfEntries;
-    %persistent string Alias = "";
-    %persistent string DPP_URI = "";
-}
-
-// One commit function on Network, like AccessPointCommit
-void ProvisionedDPPCommit();
-
-# ACS sets parameters freely, no events needed
-ba-cli ...ProvisionedDPP.1.Alias="cpe-dpp-1"
-ba-cli ...ProvisionedDPP.1.DPP_URI="DPP:C:81/6;..."
-
-# Then explicitly commits — one call processes everything
-ba-cli Device.WiFi.DataElements.Network.ProvisionedDPPCommit()
-
-
-  12344678
-  // on_action.cpp
-//
-// REMOVE: event_provisioned_dpp_changed (no longer needed)
-// REMOVE: event_provisioned_dpp_changed from get_events_list()
-//
-// ADD: provisioned_dpp_commit function handler
-// ADD: provisioned_dpp_commit to get_func_list()
-
-amxd_status_t provisioned_dpp_commit(amxd_object_t *object, amxd_function_t *func,
-                                     amxc_var_t *args, amxc_var_t *ret)
+void db::remove_dpp_bootstrapping_info(const std::string &alias)
 {
-    LOG(DEBUG) << "provisioned_dpp_commit called";
-
-    amxd_object_t *dpp_table = amxd_object_get_child(object, "ProvisionedDPP");
-    if (!dpp_table) {
-        LOG(ERROR) << "ProvisionedDPP object not found";
-        return amxd_status_object_not_found;
+    auto it = dpp_bootstrapping_map.find(alias);
+    if (it != dpp_bootstrapping_map.end()) {
+        dpp_bootstrapping_map.erase(it);
+        LOG(DEBUG) << "Removed DPP bootstrapping info for alias: " << alias;
     }
-
-    g_database->clear_dpp_bootstrapping_map();
-    LOG(DEBUG) << "Cleared existing DPP bootstrapping map";
-
-    amxd_object_for_each(instance, it, dpp_table)
-    {
-        amxd_object_t *inst = amxc_llist_it_get_data(it, amxd_object_t, it);
-
-        std::string alias   = get_param_string(inst, "Alias");
-        std::string dpp_uri = get_param_string(inst, "DPP_URI");
-
-        LOG(DEBUG) << "Processing ProvisionedDPP instance, Alias: '" << alias
-                   << "', DPP_URI: '" << dpp_uri << "'";
-
-        if (alias.empty()) {
-            LOG(WARNING) << "Skipping instance with empty Alias";
-            continue;
-        }
-
-        if (dpp_uri.empty()) {
-            LOG(WARNING) << "Skipping instance with empty DPP_URI for alias: " << alias;
-            continue;
-        }
-
-        if (!g_database->dpp_uri_parse(alias, dpp_uri)) {
-            LOG(ERROR) << "Failed to parse DPP_URI for alias: " << alias;
-            continue;
-        }
-    }
-
-    LOG(DEBUG) << "provisioned_dpp_commit done, total entries stored: "
-               << g_database->get_dpp_bootstrapping_map().size();
-
-    return amxd_status_ok;
 }
 
-// keep this for cleanup when instance is deleted
-static void event_provisioned_dpp_removed(const char *const sig_name, const amxc_var_t *const data,
-                                          void *const priv)
-{
-    amxd_object_t *dpp_obj =
-        amxd_dm_signal_get_object(beerocks::nbapi::Amxrt::getDatamodel(), data);
-
-    if (!dpp_obj) {
-        LOG(WARNING) << "Failed to get ProvisionedDPP object on removal";
-        return;
-    }
-
-    std::string alias = get_param_string(dpp_obj, "Alias");
-    if (alias.empty()) {
-        LOG(WARNING) << "ProvisionedDPP Alias is empty on removal, skipping";
-        return;
-    }
-
-    LOG(DEBUG) << "Removing DPP bootstrapping info for alias: " << alias;
-    g_database->remove_dpp_bootstrapping_info(alias);
-}
-
-// get_events_list() — only instance-removed remains for DPP
-std::vector<beerocks::nbapi::sEvents> get_events_list(void)
-{
-    const std::vector<beerocks::nbapi::sEvents> events_list = {
-        {"event_configuration_changed", event_configuration_changed},
-        {"event_traffic_separation_changed", event_traffic_separation_changed},
-        {"event_network_group_changed", event_network_group_changed},
-        {"event_network_enable_changed", event_network_enable_changed},
-        {"event_provisioned_dpp_removed", event_provisioned_dpp_removed}};
-    return events_list;
-}
-
-// get_func_list() — add provisioned_dpp_commit
-// add this line to existing functions_list:
-{"provisioned_dpp_commit", DATAELEMENTS_ROOT_DM ".Network.ProvisionedDPPCommit",
- provisioned_dpp_commit},
-
-
-12345678
-  // db.h — add declaration
-void clear_dpp_bootstrapping_map();
-const std::unordered_map<std::string, sDppBootstrappingInfo> &get_dpp_bootstrapping_map() const;
-
-// db.cpp — add implementation
 void db::clear_dpp_bootstrapping_map()
 {
-    LOG(DEBUG) << "Clearing DPP bootstrapping map, had " << dpp_bootstrapping_map.size() << " entries";
     dpp_bootstrapping_map.clear();
+    LOG(DEBUG) << "Cleared all DPP bootstrapping entries";
 }
 
-const std::unordered_map<std::string, db::sDppBootstrappingInfo> &
-db::get_dpp_bootstrapping_map() const
-{
-    return dpp_bootstrapping_map;
-}
+db.h
+void remove_dpp_bootstrapping_info(const std::string &alias);
+void clear_dpp_bootstrapping_map();
 
+public:
+    void add_dpp_bootstrapping_info(const std::string &alias, const sDppBootstrappingInfo &info);
+    void remove_dpp_bootstrapping_info(const std::string &alias);
+    void clear_dpp_bootstrapping_map();
+    bool dpp_uri_parse(const std::string &alias, const std::string &dpp_uri);
+    const sDppBootstrappingInfo *get_dpp_info_by_mac(const sMacAddr &mac) const;
+    static std::string calculate_dpp_bootstrapping_str(const sDppBootstrappingInfo &info);
 
-  
+private:
+    std::unordered_map<std::string, sDppBootstrappingInfo> dpp_bootstrapping_map;
+
