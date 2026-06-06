@@ -1,0 +1,291 @@
+============================================================
+DPP URI Test Suite — ba-cli commands + expected results
+============================================================
+
+SETUP: Create 3 instances before running tests
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP+
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP+
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP+
+
+Expected:
+  ProvisionedDPP.1.Alias = "cpe-ProvisionedDPP-1"
+  ProvisionedDPP.2.Alias = "cpe-ProvisionedDPP-2"
+  ProvisionedDPP.3.Alias = "cpe-ProvisionedDPP-3"
+
+
+============================================================
+GROUP 1 — VALID URIs (all should parse and store correctly)
+============================================================
+
+TEST 1.1 — Full valid URI, all fields, lowercase MAC
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:aabbccddeeff;I:TestDevice;V:2;H:myhost.local;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected:
+  MAC      : aa:bb:cc:dd:ee:ff
+  Version  : 2
+  Channels : 81/6
+  Info     : TestDevice
+  Host     : myhost.local
+  PubKey   : [stored, length logged]
+  Result   : Inserted new DPP entry for alias: cpe-ProvisionedDPP-1
+
+
+TEST 1.2 — Full valid URI, uppercase MAC
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:AABBCCDDEEFF;I:TestDevice;V:2;H:myhost.local;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected:
+  MAC      : aa:bb:cc:dd:ee:ff  (uppercase normalized to lowercase)
+  Result   : Overwrote existing DPP entry for alias: cpe-ProvisionedDPP-1
+
+
+TEST 1.3 — Multiple channels (C field with comma-separated list)
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/1,81/6,115/36,115/40;M:aabbccddeeff;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected:
+  Channels : 81/1, 81/6, 115/36, 115/40
+  Info     : <not set>
+  Host     : <not set>
+  Version  : 0
+
+
+TEST 1.4 — Minimal valid URI (only mandatory K field)
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.2.DPPURI="'DPP:K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected:
+  MAC      : 00:00:00:00:00:00  (not provided)
+  Version  : 0
+  Channels : <not set>
+  Info     : <not set>
+  Host     : <not set>
+  Result   : Inserted new DPP entry for alias: cpe-ProvisionedDPP-2
+
+
+TEST 1.5 — Version 1 (older DPP spec)
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.2.DPPURI="'DPP:C:81/6;M:001122334455;V:1;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected:
+  Version  : 1
+  MAC      : 00:11:22:33:44:55
+  Result   : Overwrote existing DPP entry for alias: cpe-ProvisionedDPP-2
+
+
+TEST 1.6 — No C field (channel not specified)
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.3.DPPURI="'DPP:M:aabbccddeeff;V:2;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected:
+  Channels : <not set>
+  MAC      : aa:bb:cc:dd:ee:ff
+  Version  : 2
+
+
+============================================================
+GROUP 2 — INVALID PREFIX/SUFFIX (should reject with error)
+============================================================
+
+TEST 2.1 — Wrong prefix
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'WPA:C:81/6;M:aabbccddeeff;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected LOG:
+  ERROR: Invalid DPP URI prefix, expected 'DPP:'
+  Result: parse returns false, map NOT updated
+
+
+TEST 2.2 — Single semicolon suffix (missing second ;)
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:aabbccddeeff;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;'"
+
+Expected LOG:
+  ERROR: Invalid DPP URI suffix, expected ';;'
+  Result: parse returns false, map NOT updated
+
+
+TEST 2.3 — No suffix at all
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:aabbccddeeff;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA='"
+
+Expected LOG:
+  ERROR: Invalid DPP URI suffix, expected ';;'
+  Result: parse returns false, map NOT updated
+
+
+============================================================
+GROUP 3 — MISSING MANDATORY K FIELD (should reject)
+============================================================
+
+TEST 3.1 — No public key
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:aabbccddeeff;V:2;;'"
+
+Expected LOG:
+  ERROR: DPP URI missing mandatory K (public key) for alias: cpe-ProvisionedDPP-1
+  Result: parse returns false, map NOT updated (previous value preserved)
+
+
+TEST 3.2 — K field present but empty value
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:aabbccddeeff;K:;;'"
+
+Expected LOG:
+  ERROR: DPP URI missing mandatory K (public key) for alias: cpe-ProvisionedDPP-1
+  Result: parse returns false, map NOT updated
+
+
+============================================================
+GROUP 4 — INVALID MAC VARIATIONS
+============================================================
+
+TEST 4.1 — MAC with colons (invalid per DPP spec)
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:aa:bb:cc:dd:ee:ff;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected LOG:
+  ERROR: Invalid MAC in M field: 'aa:bb:cc:dd:ee:ff' — must be 12 hex digits
+  Result: MAC stored as 00:00:00:00:00:00 (or skipped with fix applied)
+  Note: DPP spec forbids colons in M field
+
+
+TEST 4.2 — Invalid hex chars in MAC
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:XXYYZZ112233;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected LOG:
+  ERROR: Invalid MAC in M field: 'XXYYZZ112233' — must be 12 hex digits
+  Result: MAC stored as 00:00:00:00:00:00 (or skipped with fix applied)
+
+
+TEST 4.3 — MAC too short (10 chars)
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:aabbccddee;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected LOG:
+  ERROR: Invalid MAC in M field: 'aabbccddee' — must be 12 hex digits
+  Result: MAC stored as 00:00:00:00:00:00 (or skipped with fix applied)
+
+
+TEST 4.4 — MAC too long (14 chars)
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:aabbccddeeff11;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected LOG:
+  ERROR: Invalid MAC in M field: 'aabbccddeeff11' — must be 12 hex digits
+  Result: MAC stored as 00:00:00:00:00:00 (or skipped with fix applied)
+
+
+============================================================
+GROUP 5 — INVALID CHANNEL VARIATIONS
+============================================================
+
+TEST 5.1 — Channel entry missing slash
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:816;M:aabbccddeeff;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected LOG:
+  WARNING: Channel entry missing '/', skipping: '816'
+  Result: Channels: <not set>, rest of URI parsed normally
+
+
+TEST 5.2 — Non-numeric channel value
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:abc/xyz;M:aabbccddeeff;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected LOG:
+  ERROR: Invalid C field entry 'abc/xyz'
+  Result: Channels: <not set>, rest of URI parsed normally
+
+
+============================================================
+GROUP 6 — INVALID VERSION VARIATIONS
+============================================================
+
+TEST 6.1 — Non-numeric version
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:aabbccddeeff;V:abc;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected LOG:
+  ERROR: Invalid V field value: 'abc'
+  Result: Version stored as 0, rest of URI parsed normally
+
+
+TEST 6.2 — Version 0 (edge case)
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:aabbccddeeff;V:0;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected:
+  Version  : 0  (stored as-is, though unusual)
+  Note: calculate_dpp_bootstrapping_str skips V field when version == 0
+
+
+============================================================
+GROUP 7 — UPDATE / OVERWRITE BEHAVIOUR
+============================================================
+
+TEST 7.1 — Update DPPURI on same instance (overwrite)
+---------------------------------------------------------------
+# First set
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:aabbccddeeff;V:2;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+# Then update with different MAC
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:001122334455;V:2;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected LOG on second set:
+  Overwrote existing DPP entry for alias: cpe-ProvisionedDPP-1
+  MAC      : 00:11:22:33:44:55  (updated)
+  Total entries: 1  (count unchanged)
+
+
+============================================================
+GROUP 8 — UNKNOWN / RESERVED FIELDS (should be ignored)
+============================================================
+
+TEST 8.1 — Unknown field X in URI
+---------------------------------------------------------------
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.DPPURI="'DPP:C:81/6;M:aabbccddeeff;X:somevalue;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;'"
+
+Expected LOG:
+  DEBUG: Unknown key 'X' ignored
+  Result: All other fields parsed normally, X silently ignored
+
+
+============================================================
+GROUP 9 — REMOVAL
+============================================================
+
+TEST 9.1 — Remove instance, check db cleaned up
+---------------------------------------------------------------
+# First verify entries exist
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.?
+
+# Remove instance 1
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.-
+
+Expected LOG:
+  event_provisioned_dpp_removed fired
+  Removing DPP bootstrap info for alias: cpe-ProvisionedDPP-1
+  (total entries reduced by 1 on next insert/print)
+
+
+TEST 9.2 — Remove non-existent alias (after already removed)
+---------------------------------------------------------------
+# Remove same instance again (should not exist)
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.1.-
+
+Expected:
+  ba-cli error: instance not found
+  No crash, no log spam
+
+
+============================================================
+QUICK VERIFICATION COMMAND (run anytime to see current state)
+============================================================
+
+ba-cli Device.WiFi.DataElements.Network.ProvisionedDPP.?
+
+Expected output shows all instances with Alias and DPPURI values.
+Check device logs for the pretty-print output from print_dpp_bootstrap_info().
