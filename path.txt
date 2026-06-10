@@ -1,0 +1,44 @@
+ENROLLEE AGENT SIDE:
+  1. Button pressed
+  2. wpa_supplicant: DPP_BOOTSTRAP_GEN type=qrcode mac=<own_mac>
+     → generates a key pair internally
+     → returns bootstrap_id
+  3. wpa_supplicant: DPP_BOOTSTRAP_GET_URI <bootstrap_id>
+     → returns "DPP:K:MDkwEwYH...;;  ← THIS is the URI
+  4. wpa_supplicant: WPS_PBC dpp_uri=DPP:K:MDkwEwYH...;;
+     → starts WPS enrollment
+     → embeds the URI inside WPS M7 message
+
+PROXY AGENT SIDE (AP):
+  5. hostapd: WPS_PBC  ← starts listening
+  6. Receives WPS M7 from Enrollee
+     → extracts the DPP URI from M7
+     → emits event: WPS-DPP-URI uri=DPP:K:...
+
+PROXY AGENT → CONTROLLER:
+  7. ap_manager receives WPS-DPP-URI event
+  8. Builds DPP_BOOTSTRAPPING_URI_NOTIFICATION_MESSAGE (1905.1)
+     → carries the URI to Controller
+
+CONTROLLER:
+  9. Receives the URI for the first time
+  10. Calls dpp_uri_parse(alias, uri)  ← YOUR EXISTING CODE
+      → stores in dpp_bootstrapping_map
+  11. Sends CCE Indication to agents (advertise DPP configurator in beacons)
+  12. Sends DPP Authentication Request to Enrollee via EasyMesh CMDUs
+      → actual DPP crypto handshake begins
+      → Controller provisions network credentials to Enrollee via DPP
+
+PATH A — ACS/TR-181 path (YOUR EXISTING PATCH):
+  Someone externally ALREADY HAS the URI (scanned QR code, got it from ACS)
+  They inject it via TR-181:
+    ProvisionedDPP[].DPPURI = "DPP:K:...;;"
+  → event_provisioned_dpp_changed fires
+  → dpp_uri_parse() stores it in dpp_bootstrapping_map
+  Controller already knows the enrollee. Waits for it to appear.
+
+PATH B — WPS PBC push button path (WHAT YOU ARE BUILDING NOW):
+  Nobody has the URI yet.
+  The Enrollee GENERATES its own URI from its local bootstrap key.
+  WPS is used as a TRANSPORT to CARRY that URI to the Controller.
+  Controller learns the URI for the first time through WPS exchange.
