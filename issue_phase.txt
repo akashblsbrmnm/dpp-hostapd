@@ -1,0 +1,525 @@
+Issue 1 (Major): Phase E is mixing WPS and DPP incorrectly
+You currently have:
+Plain text
+DPP.pushButton()
+      |
+generate URI
+      |
+on_dpp_uri_ready()
+      |
+start_wps_pbc(uri)
+and:
+C++
+start_wps_pbc_with_dpp_uri(uri);
+I would not do this.
+Why?
+WPS PBC and DPP bootstrapping are separate onboarding methods.
+After:
+Plain text
+DPP_BOOTSTRAP_GEN
+DPP_GET_URI
+you already have the bootstrap information.
+You do NOT need:
+Plain text
+WPS_PBC
+at all.
+In EasyMesh DPP onboarding:
+Plain text
+Enrollee
+    |
+Generate URI
+    |
+Controller receives URI
+    |
+Controller sends DPP Authentication
+There is no WPS exchange.
+So I would remove:
+C++
+start_wps_pbc(uri);
+entirely.
+Instead:
+Plain text
+URI generated
+      |
+notify prplMesh
+      |
+controller
+      |
+DPP auth
+Issue 2 (Major): Phase F duplicates functionality already present
+You added:
+Plain text
+WPS_DPP_URI event
+through:
+Plain text
+hostapd
+ -> AP HAL
+ -> ap_manager
+ -> son_slave_thread
+ -> backhaul_manager
+I don't think this is needed.
+You already designed:
+Plain text
+PWHM
+    |
+DPP.URI changed
+    |
+Ambiorix notification
+    |
+sta_wlan_hal_whm subscriber
+This is enough.
+The URI is generated on the enrollee side.
+No need to push it through AP manager.
+I'd delete almost all of Phase F.
+Issue 3 (Major): Controller should not parse URI from a custom 1905 message
+You propose:
+Plain text
+DPP_BOOTSTRAPPING_URI_NOTIFICATION_MESSAGE
+New CMDU.
+Before creating a new CMDU, check:
+C++
+ProxyAgentDppTask
+and existing DPP TLVs.
+You already found:
+C++
+tlv1905EncapDpp
+tlvDppCceIndication
+tlvDppChirpValue
+There is a good chance EasyMesh R4 already defines a URI transport mechanism.
+Creating a vendor-specific CMDU may create interoperability problems.
+Issue 4: ODL naming
+Current:
+Plain text
+Status
+values:
+Plain text
+Idle
+Generating
+Ready
+Error
+I'd make them closer to actual DPP states:
+Plain text
+Idle
+BootstrapGenerating
+BootstrapReady
+Authenticating
+Configured
+Failed
+Future-proof.
+Issue 5: Bootstrap ID should not be persisted
+Current:
+Odl
+BootstrapId
+I wouldn't expose it.
+It's an implementation detail.
+Keep:
+Plain text
+URI
+Status
+only.
+Store bootstrap id internally:
+C++
+pEP->dpp_session.bootstrap_id
+Issue 6: URI length
+Current:
+C++
+char uri[2048];
+That's large enough, but I'd avoid fixed buffers.
+Use:
+C++
+amxc_string_t
+or existing dynamic string type used elsewhere in PWHM.
+DPP URIs can become surprisingly large.
+Issue 7: DPP_LISTEN timing
+Current:
+C++
+DPP_BOOTSTRAP_GEN
+DPP_GET_URI
+DPP_LISTEN
+immediately.
+I would check first whether the intended flow is:
+Proxy onboarding
+Controller initiates auth later
+or
+Self onboarding
+Enrollee waits immediately
+The EasyMesh flow may require:
+Plain text
+Controller receives URI
+Controller decides
+Controller sends auth
+In that case, starting listen immediately may be premature.
+
+
+Yes. After looking at your design and the existing ProxyAgentDppTask, I would completely remove the WPS-DPP bridge concept and redesign E/F/G around the existing EasyMesh DPP infrastructure.
+
+
+---
+
+New Philosophy
+
+Instead of:
+
+DPP URI
+   |
+WPS_DPP_URI event
+   |
+AP Manager
+   |
+Backhaul Manager
+   |
+Custom CMDU
+   |
+Controller
+
+Use:
+
+DPP URI generated
+   |
+PWHM notification
+   |
+WHM HAL
+   |
+BackhaulManager
+   |
+Agent DPP Task
+   |
+Existing EasyMesh DPP flow
+
+The agent should become the owner of DPP onboarding.
+
+
+---
+
+REWORKED PHASE E
+
+prplMesh Integration Layer
+
+Goal:
+
+PWHM generated URI
+       |
+WHM HAL receives notification
+       |
+BackhaulManager notified
+       |
+DPP onboarding task starts
+
+
+---
+
+File 1
+
+common/beerocks/bwl/whm/sta_wlan_hal_whm.cpp
+
+Add:
+
+enum class Event {
+    ...
+    DPP_URI_READY
+};
+
+Add:
+
+struct sDppUriReady {
+    std::string uri;
+};
+
+
+---
+
+Ambiorix subscription
+
+Keep:
+
+subscribe("DPP.URI")
+
+But instead of:
+
+start_wps_pbc(uri)
+
+do:
+
+event_queue_push(
+    Event::DPP_URI_READY,
+    std::make_shared<sDppUriReady>(uri));
+
+
+---
+
+HAL callback
+
+Add callback:
+
+std::function<void(std::string)> m_dpp_uri_ready_cb;
+
+
+---
+
+When URI arrives:
+
+if(m_dpp_uri_ready_cb)
+{
+    m_dpp_uri_ready_cb(uri);
+}
+
+
+---
+
+File 2
+
+backhaul_manager.cpp
+
+Add:
+
+void BackhaulManager::handle_dpp_uri_ready(
+        const std::string& uri)
+
+Store:
+
+m_pending_dpp_uri = uri;
+
+Then:
+
+start_agent_dpp_bootstrap(uri);
+
+No WPS.
+
+No AP manager.
+
+
+---
+
+REWORKED PHASE F
+
+Agent DPP Onboarding Task
+
+Instead of AP manager events.
+
+Create:
+
+agent/src/beerocks/slave/tasks/agent_dpp_onboarding_task.cpp
+
+
+---
+
+Purpose
+
+Maintain DPP onboarding state.
+
+enum class eDppState {
+    IDLE,
+    URI_READY,
+    WAIT_CONTROLLER,
+    AUTH_IN_PROGRESS,
+    CONFIG_RECEIVED,
+    COMPLETE,
+    FAILED
+};
+
+
+---
+
+Start
+
+start(uri)
+{
+    m_uri = uri;
+    state = URI_READY;
+
+    notify_controller(uri);
+}
+
+
+---
+
+Notify controller
+
+Now we must determine whether EasyMesh already defines:
+
+DPP Bootstrapping URI Notification
+
+If yes:
+
+Use it.
+
+If no:
+
+Use existing DPP encapsulation TLVs.
+
+Do NOT invent transport until repository review confirms absence.
+
+
+---
+
+Pseudo:
+
+send_dpp_bootstrap_uri(uri)
+{
+    build_existing_map_dpp_message();
+    broker_send();
+}
+
+
+---
+
+Why Task?
+
+Because later you'll handle:
+
+URI generated
+Authentication request
+Authentication response
+Configuration request
+Configuration result
+
+without cluttering BackhaulManager.
+
+
+---
+
+REWORKED PHASE G
+
+ProxyAgentDppTask Extension
+
+Current file:
+
+agent/src/beerocks/slave/tasks/proxy_agent_dpp_task.cpp
+
+already handles:
+
+DPP_CCE_INDICATION_MESSAGE
+CHIRP_NOTIFICATION_MESSAGE
+PROXIED_ENCAP_DPP_MESSAGE
+
+This is exactly where DPP onboarding belongs.
+
+
+---
+
+New responsibility
+
+Add:
+
+handle_local_bootstrap_uri()
+
+
+---
+
+Pseudo:
+
+void ProxyAgentDppTask::bootstrap_uri_ready(
+        const std::string& uri)
+{
+    m_local_uri = uri;
+
+    send_bootstrap_info_to_controller(uri);
+}
+
+
+---
+
+Controller now receives:
+
+Alias
+URI
+MAC
+
+
+---
+
+Controller can immediately use your existing:
+
+parse_dpp_bootstrap_info(alias, uri)
+
+which you already implemented.
+
+
+---
+
+Controller Side
+
+Very small changes.
+
+Current:
+
+Controller
+    |
+ProxyAgentDppTask messages
+
+Extend:
+
+case DPP_URI_READY:
+{
+    parse_dpp_bootstrap_info(alias, uri);
+
+    create_dm_instance();
+
+    send_dpp_cce_indication();
+}
+
+Reuse:
+
+send_dpp_cce_indication()
+
+already present in your DPP flow.
+
+
+---
+
+Final Architecture
+
+Button Press
+     |
+BackhaulManager
+     |
+sta_wlan_hal_whm
+     |
+DPP.pushButton()
+     |
+PWHM
+     |
+DPP_BOOTSTRAP_GEN
+DPP_GET_URI
+     |
+DM Update
+     |
+Ambiorix Event
+     |
+sta_wlan_hal_whm
+     |
+BackhaulManager
+     |
+AgentDppOnboardingTask
+     |
+ProxyAgentDppTask
+     |
+Controller
+     |
+parse_dpp_bootstrap_info()
+     |
+CCE Indication
+     |
+Existing EasyMesh DPP CMDUs
+
+
+---
+
+What Gets Deleted
+
+Delete entirely:
+
+Phase E:
+    start_wps_pbc(uri)
+
+Phase F:
+    WPS_DPP_URI event
+    AP HAL parsing
+    AP Manager message
+    Son Slave routing
+
+Phase G:
+    ACTION_APMANAGER_DPP_URI_NOTIFICATION
+    ACTION_BACKHAUL_DPP_URI_NOTIFICATION
+
+Those layers only make sense if the URI originates from hostapd/AP-side WPS. In your design the URI originates locally from the enrollee's PWHM DPP object, so routing it through AP Manager creates unnecessary complexity and duplicates functionality already present in the DPP task infrastructure.
