@@ -1,34 +1,213 @@
-void db::print_dpp_bootstrap_info() const
-{
-    if (dpp_bootstrap_info_map.empty()) {
-        LOG(INFO) << "DPP Bootstrap Info: [empty]";
-        return;
-    }
+/* SPDX-License-Identifier: BSD-2-Clause-Patent
+ *
+ * SPDX-FileCopyrightText: 2025 the prplMesh contributors (see AUTHORS.md)
+ *
+ * This code is subject to the terms of the BSD+Patent license.
+ * See LICENSE file for more details.
+ */
 
-    LOG(INFO) << "=== DPP Bootstrap Info [" << dpp_bootstrap_info_map.size() << " entries] ===";
+%define {
+    select Device.WiFi {
+        object Templates {
 
-    uint32_t idx = 1;
-    for (const auto &entry : dpp_bootstrap_info_map) {
-        const sDppBootstrappingInfo &info = entry.second;
-
-        std::string channels_str;
-        for (const auto &ch : info.operating_class_channel) {
-            if (!channels_str.empty()) {
-                channels_str += ", ";
+            object Network {
+                %persistent bool Enable = false;
+                %persistent csv_string TopologyFlag = "";
+                %persistent csv_string IEEE1905ALID = "";
+                %persistent string PrimarySSCTemplateReference = "";
+                %read-only string PrimarySSCTemplateID = "";
             }
-            channels_str += std::to_string(ch.first) + "/" + std::to_string(ch.second);
+
+            object BSSTemplate[] {
+                counted with BSSTemplateNumberOfEntries;
+
+                %key %persistent string Alias = "";
+                %key %persistent string BSSTemplateID = "";
+                %persistent uint32 Priority = 0 {
+                    on action validate call check_range [0, 255];
+                }
+                %persistent string RadioTemplateReference = "";
+                %persistent string SSCTemplateReference = "";
+                %persistent string APMLDTemplateReference = "";
+                %persistent string SecurityGroupReference = "";
+                %read-only string LinkedRadioTemplateID = "";
+                %read-only string LinkedSSCTemplateID = "";
+                %read-only string LinkedAPMLDTemplateID = "";
+                %read-only string LinkedSecurityGroupID = "";
+                %persistent csv_string TopologyFlag = "";
+                %persistent csv_string IEEE1905ALID = "";
+                %persistent uint32 MaxWLANHopLimitFlag = 0 {
+                    on action validate call check_range [0, 255];
+                }
+                %persistent string SecureEquipmentFlag = "null" {
+                    default "null";
+                    on action validate call check_enum [
+                        "true",
+                        "false",
+                        "null"
+                    ];
+                }
+                %persistent bool Enable = true;
+                %persistent string SSID = "";
+                %persistent string KeyPassphrase = "";
+                %persistent bool AdvertisementEnable = true;
+                %persistent string X_PRPLWARE-COM_VapType {
+                    default "other";
+                    on action validate call check_enum [
+                        "home",
+                        "guest",
+                        "video",
+                        "backhaul",
+                        "hotspot",
+                        "staff",
+                        "isolated",
+                        "other"
+                    ];
+                }
+            }
+
+            object RadioTemplate[] {
+                counted with RadioTemplateNumberOfEntries;
+
+                %key %persistent string Alias = "";
+                %key %persistent string RadioTemplateID = "";
+                %persistent bool Enable = true;
+                %persistent string OperatingGeneration = "";
+                %persistent int32 TransmitPowerLimit = 0 {
+                    on action validate call check_range [-128, 127];
+                }
+                %persistent uint32 Priority = 0 {
+                    on action validate call check_range [0, 255];
+                }
+                %persistent csv_string OpClassFlag = "";
+                %persistent csv_string BandFlag = "";
+                %persistent csv_string SupportedGenerationFlag = "";
+                %persistent string DFSSupportFlag = "null" {
+                    default "null";
+                    on action validate call check_enum [
+                        "true",
+                        "false",
+                        "null"
+                    ];
+                }
+                %persistent string AFCSupportFlag = "null" {
+                    default "null";
+                    on action validate call check_enum [
+                        "true",
+                        "false",
+                        "null"
+                    ];
+                }
+            }
+
+            object APMLDTemplate[] {
+                counted with APMLDTemplateNumberOfEntries;
+
+                %key %persistent string Alias = "";
+                %key %persistent string APMLDTemplateID = "";
+                %persistent bool MLOEnable = false;
+                %persistent bool STREnable = false;
+                %persistent bool NSTREnable = false;
+                %persistent bool EMLSREnable = false;
+                %persistent bool EMLMREnable = false;
+                %persistent bool TIDToLinkMapNegotiation = false;
+            }
+
+            object SSCTemplate[] {
+                counted with SSCTemplateNumberOfEntries;
+
+                %key %persistent string Alias = "";
+                %key %persistent string SSCTemplateID = "";
+                %persistent bool SSCEnable = true;
+                %persistent uint32 VID = 0 {
+                    on action validate call check_range [0, 4095];
+                }
+                %persistent csv_string HaulType = "";
+            }
+
+            object SecurityGroup[] {
+                counted with SecurityGroupNumberOfEntries;
+
+                %key %persistent string SecurityGroupID = "";
+                %persistent csv_string SecurityTemplateReferences = "";
+                %read-only csv_string LinkedSecurityTemplateID = "";
+            }
+
+            object SecurityTemplate[] {
+                counted with SecurityTemplateNumberOfEntries;
+
+                %key %persistent string Alias = "";
+                %key %persistent string SecurityTemplateID = "";
+                %persistent bool Enable = true;
+                %persistent string SecurityIEs = "";
+                %persistent uint32 Priority = 0 {
+                    on action validate call check_range [0, 255];
+                }
+                %persistent string RSNOSupportFlag = "null" {
+                    default "null";
+                    on action validate call check_enum [
+                        "true",
+                        "false",
+                        "null"
+                    ];
+                }
+                %persistent csv_string SupportedAKMSuiteFlag = "";
+                %persistent csv_string SupportedAKMSuiteSelectorFlag = "";
+                %persistent csv_string OperatingGenerationFlag = "";
+
+                %persistent object RSNE {
+                    %persistent string GroupDataCipherSuite = "";
+                    %persistent csv_string PairwiseCipherSuite = "";
+                    %persistent csv_string AKMSuite = "";
+                    %persistent csv_string AKMSuiteSelector = "";
+                    %persistent string MFP {
+                        default "Capable";
+                        on action validate call check_enum [
+                            "Disabled",
+                            "Capable",
+                            "Required"
+                        ];
+                    }
+                    %persistent string GroupManagementCipherSuite = "";
+                }
+                %persistent object RSNOE {
+                    %persistent string GroupDataCipherSuite = "";
+                    %persistent csv_string PairwiseCipherSuite = "";
+                    %persistent csv_string AKMSuite = "";
+                    %persistent csv_string AKMSuiteSelector = "";
+                    %persistent string MFP {
+                        default "Capable";
+                        on action validate call check_enum [
+                            "Disabled",
+                            "Capable",
+                            "Required"
+                        ];
+                    }
+                    %persistent string GroupManagementCipherSuite = "";
+                }
+                %persistent object RSNO2E {
+                    %persistent string GroupDataCipherSuite = "";
+                    %persistent csv_string PairwiseCipherSuite = "";
+                    %persistent csv_string AKMSuite = "";
+                    %persistent csv_string AKMSuiteSelector = "";
+                    %persistent string MFP {
+                        default "Capable";
+                        on action validate call check_enum [
+                            "Disabled",
+                            "Capable",
+                            "Required"
+                        ];
+                    }
+                    %persistent string GroupManagementCipherSuite = "";
+                }
+                %persistent object RSNXE {
+                    %persistent bool SAEH2E = false;
+                }
+                %persistent object RSNXOE {
+                    %persistent bool SAEH2E = false;
+                }
+            }
+
         }
-
-        LOG(INFO) << "  [" << idx << "] Alias    : " << entry.first;
-        LOG(INFO) << "      MAC      : " << info.mac;
-        LOG(INFO) << "      Version  : " << static_cast<int>(info.version);
-        LOG(INFO) << "      Channels : " << (channels_str.empty() ? "<not set>" : channels_str);
-        LOG(INFO) << "      Info     : " << (info.info.empty()    ? "<not set>" : info.info);
-        LOG(INFO) << "      Host     : " << (info.host.empty()    ? "<not set>" : info.host);
-        LOG(INFO) << "      PubKey   : [" << info.public_key.size() << " chars]";
-        LOG(INFO) << "      URI      : " << calculate_dpp_bootstrapping_str(info);
-        ++idx;
     }
-
-    LOG(INFO) << "=== End DPP Bootstrap Info ===";
 }
