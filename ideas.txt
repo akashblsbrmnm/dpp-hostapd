@@ -1,0 +1,185 @@
+This is excellent context. Let me analyse what Sudeep has already done and what it means for your work.
+
+---
+
+**What Sudeep built — complete picture:**
+
+**Layer 1: hostapd AP-side DPP commands (files 1+2)**
+`wld_hostapd_ap_api.h/.c` — full set of hostapd DPP ctrl_iface wrappers for the **configurator/proxy AP side**:
+- `dppBootstrapGen` — generate bootstrap on AP side
+- `dppQrCode` — feed a URI into hostapd (configurator receives enrollee URI)
+- `dppBootstrapGetUri` — retrieve generated URI
+- `dppListen` / `dppStopListen` — AP listens for DPP frames
+- `dppAuthInit` — AP initiates DPP authentication
+- `dppFrameRx/Tx` — relay DPP public action frames
+- `dppGasResponse` — relay GAS/configuration exchange
+- `setWpsDppUriNoCred` — set `dpp_uri_no_cred` flag
+- `setDppConfiguratorConnectivity` — set CCE beacon advertisement
+- `setDppCredentials` — push connector/csign/netaccesskey to hostapd
+
+**Layer 2: wpa_supplicant EP-side DPP commands (files 3+4)**
+`wld_wpaSupp_ep_api.h/.c` — full set of wpa_supplicant DPP ctrl_iface wrappers for the **enrollee bSTA side**:
+- `dppBootstrapGen` — generate bootstrap on endpoint
+- `dppBootstrapGetUri` — get the generated URI
+- `dppQrCode` — feed a URI to wpa_supplicant
+- `dppListen` / `dppStopListen`
+- `dppChirp` / `dppStopChirp`
+- `dppAuthInit`
+- `dppFrameRx` / `dppConfRespRx`
+- `setDppCredentials` — push DPP credentials to wpa_supplicant network
+- `dppReconfigure` — trigger DPP reconfiguration
+- `startWpsPbcDpp` — **the key function** — sends `WPS_PBC multi_ap=<profile> dpp_uri=<uri>` to wpa_supplicant
+
+**Layer 3: Ambiorix ODL handlers — AP side (file 5)**
+`wld_apMgmt.c` — exposes all AP-side DPP commands as callable functions on `Device.WiFi.AccessPoint.{i}`:
+
+- `_AccessPoint_dppBootstrapGenerate()`
+- `_AccessPoint_dppQRCode()`
+- `_AccessPoint_dppAuthInit()`
+- `_AccessPoint_dppListen()` / `_AccessPoint_dppStopListen()`
+- `_AccessPoint_setWpsDppUriNoCred()`
+- `_AccessPoint_setDppConfiguratorConnectivity()`
+- `_AccessPoint_setDppCredentials()`
+- `_AccessPoint_dppFrameRx()` / `_AccessPoint_dppFrameTx()`
+- `_AccessPoint_dppGASResponse()`
+- `_AccessPoint_dppConfigResponseRx()`
+- `_AccessPoint_dppGetPMKSA()`
+
+**Layer 4: Ambiorix ODL handlers — Endpoint side (file 6)**
+`wld_epMgmt.c` — exposes all endpoint DPP commands on `Device.WiFi.EndPoint.{i}`:
+- `_EndPoint_dppBootstrapGenerate()`
+- `_EndPoint_dppBootstrapGetURI()`
+- `_EndPoint_dppPushButton()` — **the most important one** — takes `dppURI` + `bssid` + `bssIndex`, enables MultiAP, calls `wld_wpaSupp_ep_startWpsPbcDpp()`
+- `_EndPoint_dppQRCode()`
+- `_EndPoint_dppListen()` / `_EndPoint_dppStopListen()`
+- `_EndPoint_dppChirp()` / `_EndPoint_dppStopChirp()`
+- `_EndPoint_dppAuthInit()`
+- `_EndPoint_dppFrameRx()` / `_EndPoint_dppConfigResponseRx()`
+- `_EndPoint_dppSetCredentials()`
+- `_EndPoint_dppReconfigure()`
+- `_EndPoint_dppGetPMKSA()`
+
+**Layer 5: Event pass-through (files 7+8+9)**
+`wld_wpaCtrl_events.h/.c` + `wifiGen_eventHandlers.c`:
+- All DPP events registered as `s_passthroughStdEvt` — pwhm recognises them but does **not** process them internally
+- pwhm forwards them raw upward via `wpaCtrlEvents` signal path
+- `wifiGen_eventHandlers.c` adds all DPP events to the standard forwarding list
+
+---
+
+**Critical insight — what this means for your work:**
+
+Sudeep has built the **entire pwhm DPP API layer**. Phases A through D of the plan are **already done**.
+
+The pwhm side exposes:
+
+```
+Device.WiFi.EndPoint.{i}.dppBootstrapGenerate(parameters)  → returns bootstrap_id
+Device.WiFi.EndPoint.{i}.dppBootstrapGetURI(id)            → returns URI string
+Device.WiFi.EndPoint.{i}.dppPushButton(dppURI, bssid, bssIndex) → WPS_PBC with URI
+
+Device.WiFi.AccessPoint.{i}.dppQRCode(uri)                → feed URI to hostapd
+Device.WiFi.AccessPoint.{i}.setWpsDppUriNoCred(enable)    → no-cred mode
+Device.WiFi.AccessPoint.{i}.setDppConfiguratorConnectivity(advertise) → CCE beacon
+Device.WiFi.AccessPoint.{i}.dppAuthInit(params)           → start DPP auth
+Device.WiFi.AccessPoint.{i}.dppFrameRx/Tx(...)            → relay DPP frames
+Device.WiFi.AccessPoint.{i}.dppGASResponse(...)           → relay GAS
+Device.WiFi.AccessPoint.{i}.setDppCredentials(...)        → push credentials
+```
+
+All DPP events pass through unchanged to prplMesh via existing wpaCtrlEvents signal.
+
+---
+
+**Revised plan — what YOU need to build (prplMesh side only):**
+
+**ENROLLEE PATH (bSTA side):**
+
+```
+common/beerocks/bwl/whm/sta_wlan_hal_whm.cpp
+  → add dpp_bootstrap_gen()
+    calls: Device.WiFi.EndPoint.{i}.dppBootstrapGenerate(params)
+    mirror how start_wps_pbc() calls pushButton() — same ambiorix call pattern
+
+  → add dpp_bootstrap_get_uri(bootstrap_id)
+    calls: Device.WiFi.EndPoint.{i}.dppBootstrapGetURI(id)
+
+  → add start_dpp_pbc(uri)
+    calls: Device.WiFi.EndPoint.{i}.dppPushButton(dppURI=uri, bssid="", bssIndex=0)
+    NOTE: _EndPoint_dppPushButton() handles MultiAP enable internally already
+
+  → subscribe to WPS-DPP-URI raw event forwarded by pwhm
+    this comes through wpaCtrlEvents signal (already forwarded by Sudeep's file 9)
+    push DPP_URI_READY event to BackhaulManager
+
+common/beerocks/bwl/sta_wlan_hal.h
+  → add virtual dpp_bootstrap_gen(), dpp_bootstrap_get_uri(), start_dpp_pbc()
+
+common/beerocks/bwl/dummy/sta_wlan_hal_dummy.cpp
+  → add stubs
+```
+
+**PROXY AP PATH (configurator side):**
+
+```
+common/beerocks/bwl/whm/ap_wlan_hal_whm.cpp
+  → WPS-DPP-URI event already forwarded raw by pwhm (Sudeep file 8+9)
+  → parse it and push WPS_DPP_URI event to ap_manager
+    look at how existing raw events are parsed in this file
+
+common/beerocks/bwl/ap_wlan_hal.h
+  → add WPS_DPP_URI to Event enum
+  → add sWpsDppUriParams struct
+
+  → add dpp_qr_code(uri) — calls AccessPoint.dppQRCode(uri)
+  → add set_wps_dpp_uri_no_cred(enable) — calls setWpsDppUriNoCred()
+  → add set_dpp_configurator_connectivity(advertise) — calls setDppConfiguratorConnectivity()
+  → add dpp_auth_init(params) — calls dppAuthInit()
+  → add dpp_frame_rx/tx() — calls dppFrameRx/Tx()
+  → add dpp_gas_response() — calls dppGASResponse()
+  → add set_dpp_credentials() — calls setDppCredentials()
+```
+
+**BACKHAUL MANAGER:**
+
+```
+agent/src/beerocks/slave/backhaul_manager/backhaul_manager.cpp
+  → in start_wps_pbc_sta() — add dpp branch:
+    1. dpp_bootstrap_gen(params) → get bootstrap_id
+    2. dpp_bootstrap_get_uri(bootstrap_id) → get uri
+    3. start_dpp_pbc(uri) → WPS_PBC with uri embedded
+
+  → handle DPP_URI_READY event from sta_wlan_hal:
+    build cACTION_BACKHAUL_DPP_URI_NOTIFICATION
+    send via m_agent_fd
+```
+
+**UPSTREAM ROUTING + CONTROLLER:**
+
+```
+son_slave_thread.cpp + backhaul_manager.cpp
+  → route DPP_URI_NOTIFICATION to controller via 1905.1
+
+controller
+  → receive URI → parse_dpp_bootstrap_info() → TR-181 → CCE indication
+```
+
+**AP MANAGER (proxy agent WPS-DPP-URI event):**
+
+```
+ap_manager.cpp
+  → handle WPS_DPP_URI event
+  → build notification message to son_slave_thread
+  → son_slave_thread routes to backhaul_manager → 1905.1 to controller
+```
+
+---
+
+**What Sudeep's work changes about Phase E:**
+
+Your `start_dpp_pbc(uri)` call in sta_wlan_hal_whm is now simple — just call `_EndPoint_dppPushButton(dppURI=uri)`. Sudeep's code handles:
+- MultiAP enable internally
+- Building the full `WPS_PBC multi_ap=<profile> dpp_uri=<uri>` command
+- Correct bssid/bssIndex handling
+
+You don't need to touch wpa_supplicant directly at all. Sudeep's pwhm layer is the boundary.
