@@ -1,81 +1,67 @@
-static swl_rc_ne s_sendHostapdReply(T_AccessPoint* pAP,
-                                    char* reply,
-                                    size_t replySize,
-                                    const char* reason,
-                                    const char* format,
-                                    ...) {
+object DPP {
+    string URI {
+        default "";
+        on action validate call check_maximum_length 1024;
+    }
+
+    string Status {
+        default "Idle";
+    }
+
+    void dppBootstrapGen(%in string params);
+}
+
+on action call _dppBootstrapGen;
+
+
+swl_rc_ne wld_ap_hostapd_dppBootstrapGen(
+        T_AccessPoint* pAP,
+        const char* params,
+        uint32_t* bootstrapId);
+swl_rc_ne wld_ap_hostapd_dppBootstrapGen(T_AccessPoint* pAP,
+                                         const char* params,
+                                         uint32_t* bootstrapId)
+{
     ASSERTS_NOT_NULL(pAP, SWL_RC_INVALID_PARAM, ME, "NULL");
-    ASSERTS_NOT_NULL(reply, SWL_RC_INVALID_PARAM, ME, "NULL");
-    ASSERTS_NOT_NULL(format, SWL_RC_INVALID_PARAM, ME, "NULL");
-    ASSERTS_TRUE(replySize > 0, SWL_RC_INVALID_PARAM, ME, "invalid reply size");
+    ASSERTS_NOT_NULL(pAP->pRadio, SWL_RC_INVALID_PARAM, ME, "NULL");
+    ASSERTS_NOT_NULL(bootstrapId, SWL_RC_INVALID_PARAM, ME, "NULL");
 
     ASSERTS_TRUE(wld_wpaCtrlInterface_isReady(pAP->wpaCtrlInterface),
                  SWL_RC_INVALID_STATE,
                  ME,
-                 "%s: wpactrl link not ready",
+                 "%s: wpactrl not ready",
                  pAP->alias);
 
-    char cmd[256] = {0};
+    ASSERTS_FALSE(swl_str_isEmpty(params),
+                  SWL_RC_INVALID_PARAM,
+                  ME,
+                  "%s: empty DPP parameters",
+                  pAP->alias);
 
-    va_list args;
-    va_start(args, format);
-    int len = vsnprintf(cmd, sizeof(cmd), format, args);
-    va_end(args);
+    ASSERTS_NOT_NULL(strstr(params, "type="),
+                     SWL_RC_INVALID_PARAM,
+                     ME,
+                     "%s: mandatory parameter 'type=' missing",
+                     pAP->alias);
 
-    ASSERT_TRUE((len >= 0) && ((size_t) len < sizeof(cmd)),
+    char cmd[512] = {0};
+
+    ASSERT_TRUE(swl_str_catFormat(cmd,
+                                  sizeof(cmd),
+                                  "DPP_BOOTSTRAP_GEN %s",
+                                  params),
                 SWL_RC_ERROR,
                 ME,
-                "%s: command truncated",
+                "%s: command build failed",
                 pAP->alias);
-
-    SAH_TRACEZ_INFO(ME,
-                    "%s: send hostapd cmd %s for %s",
-                    wld_wpaCtrlInterface_getName(pAP->wpaCtrlInterface),
-                    cmd,
-                    reason ? reason : "unknown");
-
-    bool ret = wld_wpaCtrl_sendCmdSynced(pAP->wpaCtrlInterface,
-                                         cmd,
-                                         reply,
-                                         replySize);
-
-    ASSERT_TRUE(ret,
-                SWL_RC_ERROR,
-                ME,
-                "%s: hostapd command failed (%s)",
-                pAP->alias,
-                cmd);
-
-    swl_str_removeWhitespaceEdges(reply);
-
-    SAH_TRACEZ_INFO(ME,
-                    "%s: hostapd reply [%s]",
-                    pAP->alias,
-                    reply);
-
-    return SWL_RC_OK;
-}
-swl_rc_ne wld_ap_hostapd_dppBootstrapGen(T_AccessPoint* pAP,
-                                         const char* params,
-                                         uint32_t* bootstrapId);
-swl_rc_ne wld_ap_hostapd_dppBootstrapGen(T_AccessPoint* pAP,
-                                         const char* params,
-                                         uint32_t* bootstrapId) {
-    ASSERTS_NOT_NULL(pAP, SWL_RC_INVALID_PARAM, ME, "NULL");
-    ASSERTS_NOT_NULL(bootstrapId, SWL_RC_INVALID_PARAM, ME, "NULL");
 
     char reply[32] = {0};
 
     swl_rc_ne rc =
-        s_sendHostapdReply(
-            pAP,
-            reply,
-            sizeof(reply),
-            "DPP_BOOTSTRAP_GEN",
-            swl_str_isEmpty(params) ?
-                "DPP_BOOTSTRAP_GEN" :
-                "DPP_BOOTSTRAP_GEN %s",
-            params);
+        s_sendHostapdCommandReply(pAP,
+                                  cmd,
+                                  reply,
+                                  sizeof(reply));
 
     ASSERT_TRUE(swl_rc_isOk(rc),
                 rc,
@@ -83,18 +69,16 @@ swl_rc_ne wld_ap_hostapd_dppBootstrapGen(T_AccessPoint* pAP,
                 "%s: DPP_BOOTSTRAP_GEN failed",
                 pAP->alias);
 
-    /*
-     * Expected replies:
-     *   "1"
-     *   "15"
-     *   "123"
-     * Failure:
-     *   "FAIL"
-     */
+    ASSERT_FALSE(strcmp(reply, "FAIL") == 0,
+                 SWL_RC_ERROR,
+                 ME,
+                 "%s: hostapd returned FAIL",
+                 pAP->alias);
 
     errno = 0;
 
     char* end = NULL;
+
     long id = strtol(reply, &end, 10);
 
     ASSERT_TRUE(errno == 0 &&
@@ -108,43 +92,318 @@ swl_rc_ne wld_ap_hostapd_dppBootstrapGen(T_AccessPoint* pAP,
                 pAP->alias,
                 reply);
 
-    *bootstrapId = (uint32_t) id;
+    *bootstrapId = (uint32_t)id;
 
     SAH_TRACEZ_INFO(ME,
-                    "%s: DPP bootstrap id %u",
+                    "%s: generated DPP bootstrap id %u",
                     pAP->alias,
                     *bootstrapId);
 
     return SWL_RC_OK;
 }
+static swl_rc_ne s_sendHostapdCommandReply(T_AccessPoint* pAP,
+                                           const char* cmd,
+                                           char* reply,
+                                           size_t replySize)
+{
+    ASSERTS_NOT_NULL(pAP, SWL_RC_INVALID_PARAM, ME, "NULL");
+    ASSERTS_NOT_NULL(reply, SWL_RC_INVALID_PARAM, ME, "NULL");
+    ASSERTS_NOT_NULL(cmd, SWL_RC_INVALID_PARAM, ME, "NULL");
 
-Then inside _dppBootstrapGen() build the params string:
-char params[512] = {0};
+    ASSERTS_TRUE(replySize > 0,
+                 SWL_RC_INVALID_PARAM,
+                 ME,
+                 "invalid reply size");
 
-swl_str_catFormat(params, sizeof(params),
-                  "type=%s", type);
+    ASSERTS_TRUE(wld_wpaCtrlInterface_isReady(pAP->wpaCtrlInterface),
+                 SWL_RC_INVALID_STATE,
+                 ME,
+                 "%s: wpactrl link not ready",
+                 pAP->alias);
 
-if(!swl_str_isEmpty(chan))
-    swl_str_catFormat(params, sizeof(params),
-                      " chan=%s", chan);
+    SAH_TRACEZ_INFO(ME,
+                    "%s: send hostapd cmd [%s]",
+                    wld_wpaCtrlInterface_getName(pAP->wpaCtrlInterface),
+                    cmd);
 
-if(!swl_str_isEmpty(mac))
-    swl_str_catFormat(params, sizeof(params),
-                      " mac=%s", mac);
+    bool ret =
+        wld_wpaCtrl_sendCmdSynced(pAP->wpaCtrlInterface,
+                                  cmd,
+                                  reply,
+                                  replySize);
 
-if(!swl_str_isEmpty(info))
-    swl_str_catFormat(params, sizeof(params),
-                      " info=%s", info);
+    ASSERT_TRUE(ret,
+                SWL_RC_ERROR,
+                ME,
+                "%s: hostapd command failed [%s]",
+                pAP->alias,
+                cmd);
 
-if(!swl_str_isEmpty(curve))
-    swl_str_catFormat(params, sizeof(params),
-                      " curve=%s", curve);
+    swl_str_removeWhitespaceEdges(reply);
 
-if(!swl_str_isEmpty(key))
-    swl_str_catFormat(params, sizeof(params),
-                      " key=%s", key);
+    SAH_TRACEZ_INFO(ME,
+                    "%s: hostapd reply [%s]",
+                    pAP->alias,
+                    reply);
 
-uint32_t bootstrapId;
-rc = wld_ap_hostapd_dppBootstrapGen(pAP,
-                                    params,
-                                    &bootstrapId);
+    return SWL_RC_OK;
+}
+amxd_status_t _dppBootstrapGen(amxd_object_t* object,
+                               amxd_function_t* func _UNUSED,
+                               amxc_var_t* args,
+                               amxc_var_t* retval)
+{
+    amxd_object_t* pApObj = amxd_object_get_parent(object);
+    T_AccessPoint* pAP    = wld_ap_fromObj(pApObj);
+
+    amxc_var_init(retval);
+    amxc_var_set_type(retval, AMXC_VAR_ID_HTABLE);
+
+    if((pAP == NULL) || (pAP->pRadio == NULL)) {
+        return s_setCommandReply(retval,
+                                 SWL_USP_CMD_STATUS_ERROR_OTHER,
+                                 amxd_status_invalid_value);
+    }
+
+    const char* params = GET_CHAR_ARG(args, "params");
+
+    if(swl_str_isEmpty(params)) {
+        SAH_TRACEZ_ERROR(ME,
+                         "%s: empty DPP parameters",
+                         pAP->alias);
+
+        return s_setCommandReply(
+                retval,
+                SWL_USP_CMD_STATUS_ERROR_INVALID_ARGUMENTS,
+                amxd_status_invalid_value);
+    }
+
+    if(strstr(params, "type=") == NULL) {
+        SAH_TRACEZ_ERROR(ME,
+                         "%s: mandatory parameter 'type=' missing",
+                         pAP->alias);
+
+        return s_setCommandReply(
+                retval,
+                SWL_USP_CMD_STATUS_ERROR_INVALID_ARGUMENTS,
+                amxd_status_invalid_value);
+    }
+
+    SAH_TRACEZ_INFO(ME,
+                    "%s: DPP_BOOTSTRAP_GEN params=[%s]",
+                    pAP->alias,
+                    params);
+
+    uint32_t bootstrapId = 0;
+
+    swl_rc_ne rc =
+        wld_ap_hostapd_dppBootstrapGen(
+                pAP,
+                params,
+                &bootstrapId);
+
+    if(rc < SWL_RC_OK) {
+        SAH_TRACEZ_ERROR(ME,
+                         "%s: DPP bootstrap generation failed",
+                         pAP->alias);
+
+        return s_setCommandReply(
+                retval,
+                SWL_USP_CMD_STATUS_ERROR_OTHER,
+                amxd_status_unknown_error);
+    }
+
+    amxc_var_add_key(uint32_t,
+                     retval,
+                     "BootstrapId",
+                     bootstrapId);
+
+    SAH_TRACEZ_INFO(ME,
+                    "%s: bootstrap id=%u",
+                    pAP->alias,
+                    bootstrapId);
+
+    return s_setCommandReply(
+            retval,
+            SWL_USP_CMD_STATUS_OK,
+            amxd_status_ok);
+}
+
+// GET URI FLOW
+
+ODL RPC
+   ↓
+_dppBootstrapGetUri()
+   ↓
+wld_ap_hostapd_dppBootstrapGetUri()
+   ↓
+s_sendHostapdCommandReply()
+   ↓
+hostapd DPP_BOOTSTRAP_GET_URI <id>
+
+
+object DPP {
+    string URI {
+        default "";
+        on action validate call check_maximum_length 1024;
+    }
+
+    string Status {
+        default "Idle";
+    }
+
+    void dppBootstrapGen(%in string params);
+
+    void dppBootstrapGetUri(%in uint32 bootstrapId);
+}
+
+swl_rc_ne wld_ap_hostapd_dppBootstrapGetUri(
+        T_AccessPoint* pAP,
+        uint32_t bootstrapId,
+        char* uri,
+        size_t uriSize)
+{
+    ASSERTS_NOT_NULL(pAP,
+                     SWL_RC_INVALID_PARAM,
+                     ME,
+                     "NULL");
+
+    ASSERTS_NOT_NULL(pAP->pRadio,
+                     SWL_RC_INVALID_PARAM,
+                     ME,
+                     "NULL");
+
+    ASSERTS_NOT_NULL(uri,
+                     SWL_RC_INVALID_PARAM,
+                     ME,
+                     "NULL");
+
+    ASSERTS_TRUE(uriSize > 0,
+                 SWL_RC_INVALID_PARAM,
+                 ME,
+                 "invalid uri size");
+
+    ASSERTS_TRUE(wld_wpaCtrlInterface_isReady(
+                    pAP->wpaCtrlInterface),
+                 SWL_RC_INVALID_STATE,
+                 ME,
+                 "%s: wpactrl not ready",
+                 pAP->alias);
+
+    ASSERTS_TRUE(bootstrapId > 0,
+                 SWL_RC_INVALID_PARAM,
+                 ME,
+                 "%s: invalid bootstrap id",
+                 pAP->alias);
+
+    char cmd[128] = {0};
+
+    ASSERT_TRUE(
+            swl_str_catFormat(cmd,
+                              sizeof(cmd),
+                              "DPP_BOOTSTRAP_GET_URI %u",
+                              bootstrapId),
+            SWL_RC_ERROR,
+            ME,
+            "%s: command build failed",
+            pAP->alias);
+
+    swl_rc_ne rc =
+            s_sendHostapdCommandReply(
+                    pAP,
+                    cmd,
+                    uri,
+                    uriSize);
+
+    ASSERT_TRUE(swl_rc_isOk(rc),
+                rc,
+                ME,
+                "%s: DPP_BOOTSTRAP_GET_URI failed",
+                pAP->alias);
+
+    ASSERT_FALSE(strcmp(uri, "FAIL") == 0,
+                 SWL_RC_ERROR,
+                 ME,
+                 "%s: hostapd returned FAIL",
+                 pAP->alias);
+
+    ASSERT_TRUE(strncmp(uri, "DPP:", 4) == 0,
+                SWL_RC_ERROR,
+                ME,
+                "%s: invalid DPP URI [%s]",
+                pAP->alias,
+                uri);
+
+    SAH_TRACEZ_INFO(ME,
+                    "%s: DPP URI length=%zu",
+                    pAP->alias,
+                    strlen(uri));
+
+    return SWL_RC_OK;
+}
+
+amxd_status_t _dppBootstrapGetUri(
+        amxd_object_t* object,
+        amxd_function_t* func _UNUSED,
+        amxc_var_t* args,
+        amxc_var_t* retval)
+{
+    amxd_object_t* pApObj = amxd_object_get_parent(object);
+    T_AccessPoint* pAP    = wld_ap_fromObj(pApObj);
+
+    amxc_var_init(retval);
+    amxc_var_set_type(retval, AMXC_VAR_ID_HTABLE);
+
+    if((pAP == NULL) || (pAP->pRadio == NULL)) {
+        return s_setCommandReply(
+                retval,
+                SWL_USP_CMD_STATUS_ERROR_OTHER,
+                amxd_status_invalid_value);
+    }
+
+    uint32_t bootstrapId =
+            GET_UINT32_ARG(args, "bootstrapId");
+
+    if(bootstrapId == 0) {
+        return s_setCommandReply(
+                retval,
+                SWL_USP_CMD_STATUS_ERROR_INVALID_ARGUMENTS,
+                amxd_status_invalid_value);
+    }
+
+    char uri[1024] = {0};
+
+    swl_rc_ne rc =
+            wld_ap_hostapd_dppBootstrapGetUri(
+                    pAP,
+                    bootstrapId,
+                    uri,
+                    sizeof(uri));
+
+    if(rc < SWL_RC_OK) {
+        SAH_TRACEZ_ERROR(ME,
+                         "%s: DPP URI retrieval failed",
+                         pAP->alias);
+
+        return s_setCommandReply(
+                retval,
+                SWL_USP_CMD_STATUS_ERROR_OTHER,
+                amxd_status_unknown_error);
+    }
+
+    amxc_var_add_key(cstring_t,
+                     retval,
+                     "URI",
+                     uri);
+
+    SAH_TRACEZ_INFO(ME,
+                    "%s: DPP URI retrieved",
+                    pAP->alias);
+
+    return s_setCommandReply(
+            retval,
+            SWL_USP_CMD_STATUS_OK,
+            amxd_status_ok);
+}
+
+
