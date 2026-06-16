@@ -1,172 +1,297 @@
-1. What I verified
-Easy Connect Push Button specification
-In Easy Connect (DPP) specification section 5.8:
-Plain text
-Push Button
-↓
-Presence Announcement
-↓
-Presence Announcement Response
-↓
-PKEX
-↓
-DPP Authentication
-↓
-DPP Configuration
-The specification explicitly describes:
-Push Button Presence Announcement
-Push Button Presence Announcement Response
-PKEX bootstrapping
-DPP Authentication
-GAS Configuration Exchange
-There is no mention of WPS M1-M8 credential exchange.
-Hostapd implementation
-I validated hostapd source and found:
-C
-hostapd_dpp_push_button()
-hostapd_dpp_rx_pb_presence_announcement()
-hostapd_dpp_pb_pkex_init()
-hostapd_dpp_gas_status_handler()
-These directly implement the Easy Connect Push Button PKEX flow.
-So:
-Plain text
-Easy Connect Spec
-      ==
-Hostapd DPP Push Button
-2. Main question
-The architecture document mentions:
-Plain text
-WPS_PBC multi_ap=1 dpp_uri=<URI>
-However:
-I could not find any support for this in hostapd
-I searched:
-Bash
-grep -R "dpp_uri" .
-grep -R "WPS-DPP-URI" .
-grep -R "DPP-URI" .
-grep -R "skip_cred_build" .
-grep -R "dpp_uri_no_cred" .
-No matches.
-So I need clarification on:
-Plain text
-Is WPS_PBC + DPP URI
+bool db::parse_dpp_bootstrap_info(const std::string& alias,
+                                  const std::string& dpp_uri,
+                                  std::string& error) {
+    error.clear();
 
-a) actual implementation in some fork?
+    static const std::string prefix = "DPP:";
+    static const std::string suffix = ";;";
 
-or
+    if(dpp_uri.compare(0, prefix.size(), prefix) != 0) {
+        error = "missing DPP prefix";
+        return false;
+    }
 
-b) architectural abstraction?
+    if((dpp_uri.size() < suffix.size()) ||
+       (dpp_uri.compare(dpp_uri.size() - suffix.size(),
+                        suffix.size(),
+                        suffix) != 0)) {
+        error = "missing DPP suffix";
+        return false;
+    }
 
-or
+    std::string body =
+        dpp_uri.substr(prefix.size(),
+                       dpp_uri.size() - prefix.size() - suffix.size());
 
-c) intended future behaviour?
-3. Clarification needed on onboarding model
-From the specification and hostapd implementation I currently see two separate onboarding methods:
-Method 1
-Traditional DPP
-Plain text
-QR Code
-URI
-NFC
-BLE
-Bootstrap key already known.
-Method 2
-DPP Push Button
-Plain text
-Push Button
-↓
-Presence Announcement
-↓
-PKEX
-↓
-Authentication
-↓
-Configuration
-No QR code required.
-Method 3
-WPS PBC
-Plain text
-WPS_PBC
-↓
-WPS M1-M8
-↓
-Credential provisioning
-Completely separate protocol.
-Question:
-Plain text
-Which of these methods are we actually implementing?
-4. GAS handling clarification
-Team mentioned:
-Plain text
-GAS is being worked on
-Questions:
-Are we implementing
-Plain text
-hostapd native DPP GAS
-or
-Plain text
-Controller proxied GAS
-as described in the onboarding architecture?
-Because these are different implementations.
-Also
-Team mentioned:
-Plain text
-KE generated but no event received from agent
-I suspect this means:
-Plain text
-Authentication succeeded
-KE derived
-but agent never forwarded:
-Plain text
-GAS Configuration Request
-event upwards.
-Can we verify:
-Plain text
-Which exact event is expected?
-Which component should emit it?
-5. C-sign key clarification
-Architecture mentions:
-Plain text
-Store C-sign private key
-Need clarification:
-Plain text
-Where is C-sign key generated?
-Who owns it?
-Controller?
-Agent?
-External PKI?
-because it is required for:
-Plain text
-Connector signing
-during configuration.
-6. Controller role clarification
-Current architecture says:
-Plain text
-Configurator = Controller
-Question:
-Plain text
-Are we using hostapd as Configurator?
+    if(body.empty()) {
+        error = "empty DPP payload";
+        return false;
+    }
 
-or
+    sDppBootstrappingInfo info;
+    info.alias = alias;
 
-Is prplMesh Controller acting as Configurator?
-This changes implementation completely.
-7. What I already implemented in pwhm
-Current additions:
-Plain text
-AccessPoint.DPP.dppBootstrapGen()
-AccessPoint.DPP.dppBootstrapGetUri()
+    bool seen_c = false;
+    bool seen_m = false;
+    bool seen_i = false;
+    bool seen_v = false;
+    bool seen_h = false;
+    bool seen_k = false;
 
-EndPoint.DPP.dppBootstrapGen()
-EndPoint.DPP.dppBootstrapGetUri()
-using native:
-Plain text
-DPP_BOOTSTRAP_GEN
-DPP_BOOTSTRAP_GET_URI
-commands.
-Before implementing further APIs I need confirmation on:
-Plain text
-Expected onboarding flow
-Expected Configurator location
-Push Button vs WPS_PBC
-Controller GAS ownership
+    std::vector<std::string> fields =
+        beerocks::string_utils::str_split(body, ';');
+
+    for(const auto& field : fields) {
+
+        if(field.empty()) {
+            continue;
+        }
+
+        size_t sep = field.find(':');
+
+        if((sep == std::string::npos) || (sep == 0)) {
+            error = "invalid field format";
+            return false;
+        }
+
+        // DPP Specification: Keys are strictly single characters
+        if(sep != 1) {
+            error = "invalid DPP field name";
+            return false;
+        }
+
+        char key = field[0];
+        std::string value = field.substr(sep + 1);
+
+        if(value.empty()) {
+            error = "empty value for DPP field";
+            return false;
+        }
+
+        switch(key) {
+
+        case 'C': {
+            if(seen_c) {
+                error = "duplicate C field";
+                return false;
+            }
+            seen_c = true;
+
+            auto pairs =
+                beerocks::string_utils::str_split(value, ',');
+
+            for(const auto& pair : pairs) {
+
+                auto parts =
+                    beerocks::string_utils::str_split(pair, '/');
+
+                if(parts.size() != 2) {
+                    error = "invalid channel list";
+                    return false;
+                }
+
+                char* end = nullptr;
+                errno = 0;
+
+                long op_class =
+                    strtol(parts[0].c_str(), &end, 10);
+
+                if((errno != 0) ||
+                   (end == parts[0].c_str()) ||
+                   (*end != '\0') ||
+                   (op_class < 0) ||
+                   (op_class > 255)) {
+                    error = "invalid operating class";
+                    return false;
+                }
+
+                errno = 0;
+                long channel =
+                    strtol(parts[1].c_str(), &end, 10);
+
+                if((errno != 0) ||
+                   (end == parts[1].c_str()) ||
+                   (*end != '\0') ||
+                   (channel < 0) ||
+                   (channel > 255)) {
+                    error = "invalid channel";
+                    return false;
+                }
+
+                auto ret = info.operating_class_channel.emplace(
+                    static_cast<uint8_t>(op_class),
+                    static_cast<uint8_t>(channel));
+                
+                if(!ret.second) {
+                    error = "duplicate operating class and channel pair";
+                    return false;
+                }
+            }
+
+            break;
+        }
+
+        case 'M': {
+            if(seen_m) {
+                error = "duplicate M field";
+                return false;
+            }
+            seen_m = true;
+
+            if(value.length() != 12) {
+                error = "invalid DPP MAC length";
+                return false;
+            }
+
+            // Safe cast to unsigned char to prevent undefined behavior
+            if(!std::all_of(value.begin(),
+                            value.end(),
+                            [](unsigned char c) { return std::isxdigit(c); })) {
+                error = "invalid DPP MAC";
+                return false;
+            }
+
+            std::string mac_colon;
+            mac_colon.reserve(17);
+
+            for(size_t i = 0; i < value.size(); i += 2) {
+                if(i) {
+                    mac_colon += ":";
+                }
+                mac_colon += value.substr(i, 2);
+            }
+
+            uint8_t mac_bin[ETH_ALEN];
+
+            if(!tlvf::mac_from_string(mac_bin, mac_colon)) {
+                error = "failed to parse MAC";
+                return false;
+            }
+
+            info.mac = tlvf::mac_from_string(mac_colon);
+
+            break;
+        }
+
+        case 'I': {
+            if(seen_i) {
+                error = "duplicate I field";
+                return false;
+            }
+            seen_i = true;
+
+            info.info = value;
+            break;
+        }
+
+        case 'V': {
+            if(seen_v) {
+                error = "duplicate V field";
+                return false;
+            }
+            seen_v = true;
+
+            char* end = nullptr;
+            errno = 0;
+
+            long version =
+                strtol(value.c_str(), &end, 10);
+
+            if((errno != 0) ||
+               (end == value.c_str()) ||
+               (*end != '\0') ||
+               (version < 0) ||
+               (version > 255)) {
+                error = "invalid version";
+                return false;
+            }
+
+            info.version =
+                static_cast<uint8_t>(version);
+
+            break;
+        }
+
+        case 'H': {
+            if(seen_h) {
+                error = "duplicate H field";
+                return false;
+            }
+            seen_h = true;
+
+            info.host = value;
+            break;
+        }
+
+        case 'K': {
+            if(seen_k) {
+                error = "duplicate K field";
+                return false;
+            }
+            seen_k = true;
+
+            info.public_key = value;
+
+            std::string decoded;
+
+            if(!beerocks::string_utils::base64_url_decode(
+                   value,
+                   decoded)) {
+                error = "invalid DPP public key format";
+                return false;
+            }
+
+            if(decoded.empty()) {
+                error = "empty decoded public key";
+                return false;
+            }
+
+            mapf::encryption::sha256 sha;
+
+            if(!sha.update(
+                    reinterpret_cast<const uint8_t*>(
+                        decoded.data()),
+                    decoded.size()) ||
+               !sha.digest(info.pkhash.data())) {
+                error = "failed to hash public key";
+                return false;
+            }
+
+            info.pkhash_valid = true;
+
+            info.pkhash_hex =
+                hex_string_from_bytes(
+                    info.pkhash.data(),
+                    info.pkhash.size());
+
+            break;
+        }
+
+        default:
+            LOG(DEBUG) << "Ignoring unknown DPP key: " << key;
+            break;
+        }
+    }
+
+    if(!seen_k) {
+        error = "missing mandatory K field";
+        return false;
+    }
+
+    if(!info.pkhash_valid) {
+        error = "public key hash not generated";
+        return false;
+    }
+
+    dpp_bootstrap_info_map[alias] = std::move(info);
+
+    LOG(INFO)
+        << "Stored DPP bootstrap info for alias "
+        << alias
+        << ", total entries="
+        << dpp_bootstrap_info_map.size()
+        << ", pkhash="
+        << dpp_bootstrap_info_map[alias].pkhash_hex;
+
+    return true;
+}
