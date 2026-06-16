@@ -3,25 +3,29 @@ bool db::parse_dpp_bootstrap_info(const std::string& alias,
                                   std::string& error) {
     error.clear();
 
+    // 1. URI Normalization
+    std::string uri_normalized = dpp_uri;
+    beerocks::string_utils::trim(uri_normalized);
+
     static const std::string prefix = "DPP:";
     static const std::string suffix = ";;";
 
-    if(dpp_uri.compare(0, prefix.size(), prefix) != 0) {
+    if(uri_normalized.compare(0, prefix.size(), prefix) != 0) {
         error = "missing DPP prefix";
         return false;
     }
 
-    if((dpp_uri.size() < suffix.size()) ||
-       (dpp_uri.compare(dpp_uri.size() - suffix.size(),
-                        suffix.size(),
-                        suffix) != 0)) {
+    if((uri_normalized.size() < suffix.size()) ||
+       (uri_normalized.compare(uri_normalized.size() - suffix.size(),
+                               suffix.size(),
+                               suffix) != 0)) {
         error = "missing DPP suffix";
         return false;
     }
 
     std::string body =
-        dpp_uri.substr(prefix.size(),
-                       dpp_uri.size() - prefix.size() - suffix.size());
+        uri_normalized.substr(prefix.size(),
+                              uri_normalized.size() - prefix.size() - suffix.size());
 
     if(body.empty()) {
         error = "empty DPP payload";
@@ -54,7 +58,6 @@ bool db::parse_dpp_bootstrap_info(const std::string& alias,
             return false;
         }
 
-        // DPP Specification: Keys are strictly single characters
         if(sep != 1) {
             error = "invalid DPP field name";
             return false;
@@ -118,14 +121,23 @@ bool db::parse_dpp_bootstrap_info(const std::string& alias,
                     return false;
                 }
 
-                auto ret = info.operating_class_channel.emplace(
-                    static_cast<uint8_t>(op_class),
-                    static_cast<uint8_t>(channel));
-                
-                if(!ret.second) {
+                // 2. Container-agnostic duplicate check
+                bool pair_exists = false;
+                for(const auto& existing : info.operating_class_channel) {
+                    if(existing.first == op_class && existing.second == channel) {
+                        pair_exists = true;
+                        break;
+                    }
+                }
+
+                if(pair_exists) {
                     error = "duplicate operating class and channel pair";
                     return false;
                 }
+
+                info.operating_class_channel.emplace(
+                    static_cast<uint8_t>(op_class),
+                    static_cast<uint8_t>(channel));
             }
 
             break;
@@ -143,7 +155,6 @@ bool db::parse_dpp_bootstrap_info(const std::string& alias,
                 return false;
             }
 
-            // Safe cast to unsigned char to prevent undefined behavior
             if(!std::all_of(value.begin(),
                             value.end(),
                             [](unsigned char c) { return std::isxdigit(c); })) {
