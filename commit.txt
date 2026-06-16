@@ -1,273 +1,172 @@
-static swl_rc_ne s_sendWpaSuppCommandReply(T_EndPoint* pEP,
-                                           const char* cmd,
-                                           char* reply,
-                                           size_t replySize)
-{
-    ASSERTS_NOT_NULL(pEP, SWL_RC_INVALID_PARAM, ME, "NULL");
-    ASSERTS_NOT_NULL(cmd, SWL_RC_INVALID_PARAM, ME, "NULL");
-    ASSERTS_NOT_NULL(reply, SWL_RC_INVALID_PARAM, ME, "NULL");
+1. What I verified
+Easy Connect Push Button specification
+In Easy Connect (DPP) specification section 5.8:
+Plain text
+Push Button
+↓
+Presence Announcement
+↓
+Presence Announcement Response
+↓
+PKEX
+↓
+DPP Authentication
+↓
+DPP Configuration
+The specification explicitly describes:
+Push Button Presence Announcement
+Push Button Presence Announcement Response
+PKEX bootstrapping
+DPP Authentication
+GAS Configuration Exchange
+There is no mention of WPS M1-M8 credential exchange.
+Hostapd implementation
+I validated hostapd source and found:
+C
+hostapd_dpp_push_button()
+hostapd_dpp_rx_pb_presence_announcement()
+hostapd_dpp_pb_pkex_init()
+hostapd_dpp_gas_status_handler()
+These directly implement the Easy Connect Push Button PKEX flow.
+So:
+Plain text
+Easy Connect Spec
+      ==
+Hostapd DPP Push Button
+2. Main question
+The architecture document mentions:
+Plain text
+WPS_PBC multi_ap=1 dpp_uri=<URI>
+However:
+I could not find any support for this in hostapd
+I searched:
+Bash
+grep -R "dpp_uri" .
+grep -R "WPS-DPP-URI" .
+grep -R "DPP-URI" .
+grep -R "skip_cred_build" .
+grep -R "dpp_uri_no_cred" .
+No matches.
+So I need clarification on:
+Plain text
+Is WPS_PBC + DPP URI
 
-    ASSERTS_TRUE(replySize > 0,
-                 SWL_RC_INVALID_PARAM,
-                 ME,
-                 "invalid reply size");
+a) actual implementation in some fork?
 
-    wld_wpaCtrlInterface_t* pInterface =
-        wld_wpaSupp_ep_getWpaCtrlInterface(pEP);
+or
 
-    ASSERTS_TRUE(wld_wpaCtrlInterface_isReady(pInterface),
-                 SWL_RC_INVALID_STATE,
-                 ME,
-                 "%s: Connection with wpa_supplicant not yet established",
-                 pEP->Name);
+b) architectural abstraction?
 
-    SAH_TRACEZ_INFO(ME,
-                    "%s: send wpa_supplicant cmd [%s]",
-                    pEP->Name,
-                    cmd);
+or
 
-    bool ret =
-        wld_wpaCtrl_sendCmdSynced(
-            pInterface,
-            cmd,
-            reply,
-            replySize);
+c) intended future behaviour?
+3. Clarification needed on onboarding model
+From the specification and hostapd implementation I currently see two separate onboarding methods:
+Method 1
+Traditional DPP
+Plain text
+QR Code
+URI
+NFC
+BLE
+Bootstrap key already known.
+Method 2
+DPP Push Button
+Plain text
+Push Button
+↓
+Presence Announcement
+↓
+PKEX
+↓
+Authentication
+↓
+Configuration
+No QR code required.
+Method 3
+WPS PBC
+Plain text
+WPS_PBC
+↓
+WPS M1-M8
+↓
+Credential provisioning
+Completely separate protocol.
+Question:
+Plain text
+Which of these methods are we actually implementing?
+4. GAS handling clarification
+Team mentioned:
+Plain text
+GAS is being worked on
+Questions:
+Are we implementing
+Plain text
+hostapd native DPP GAS
+or
+Plain text
+Controller proxied GAS
+as described in the onboarding architecture?
+Because these are different implementations.
+Also
+Team mentioned:
+Plain text
+KE generated but no event received from agent
+I suspect this means:
+Plain text
+Authentication succeeded
+KE derived
+but agent never forwarded:
+Plain text
+GAS Configuration Request
+event upwards.
+Can we verify:
+Plain text
+Which exact event is expected?
+Which component should emit it?
+5. C-sign key clarification
+Architecture mentions:
+Plain text
+Store C-sign private key
+Need clarification:
+Plain text
+Where is C-sign key generated?
+Who owns it?
+Controller?
+Agent?
+External PKI?
+because it is required for:
+Plain text
+Connector signing
+during configuration.
+6. Controller role clarification
+Current architecture says:
+Plain text
+Configurator = Controller
+Question:
+Plain text
+Are we using hostapd as Configurator?
 
-    ASSERT_TRUE(ret,
-                SWL_RC_ERROR,
-                ME,
-                "%s: command failed [%s]",
-                pEP->Name,
-                cmd);
+or
 
-    swl_str_removeWhitespaceEdges(reply);
+Is prplMesh Controller acting as Configurator?
+This changes implementation completely.
+7. What I already implemented in pwhm
+Current additions:
+Plain text
+AccessPoint.DPP.dppBootstrapGen()
+AccessPoint.DPP.dppBootstrapGetUri()
 
-    SAH_TRACEZ_INFO(ME,
-                    "%s: reply [%s]",
-                    pEP->Name,
-                    reply);
-
-    return SWL_RC_OK;
-}
-
-swl_rc_ne wld_wpaSupp_ep_dppBootstrapGen(
-        T_EndPoint* pEP,
-        const char* params,
-        uint32_t* bootstrapId)
-{
-    ASSERTS_NOT_NULL(pEP,
-                     SWL_RC_INVALID_PARAM,
-                     ME,
-                     "NULL");
-
-    ASSERTS_NOT_NULL(bootstrapId,
-                     SWL_RC_INVALID_PARAM,
-                     ME,
-                     "NULL");
-
-    ASSERTS_FALSE(swl_str_isEmpty(params),
-                  SWL_RC_INVALID_PARAM,
-                  ME,
-                  "%s: empty DPP parameters",
-                  pEP->Name);
-
-    ASSERTS_NOT_NULL(strstr(params, "type="),
-                     SWL_RC_INVALID_PARAM,
-                     ME,
-                     "%s: mandatory parameter type= missing",
-                     pEP->Name);
-
-    char cmd[512] = {0};
-
-    ASSERT_TRUE(
-        swl_str_catFormat(
-            cmd,
-            sizeof(cmd),
-            "DPP_BOOTSTRAP_GEN %s",
-            params),
-        SWL_RC_ERROR,
-        ME,
-        "command build failed");
-
-    char reply[32] = {0};
-
-    swl_rc_ne rc =
-        s_sendWpaSuppCommandReply(
-            pEP,
-            cmd,
-            reply,
-            sizeof(reply));
-
-    ASSERT_TRUE(
-        swl_rc_isOk(rc),
-        rc,
-        ME,
-        "%s: DPP_BOOTSTRAP_GEN failed",
-        pEP->Name);
-
-    ASSERT_FALSE(
-        strcmp(reply, "FAIL") == 0,
-        SWL_RC_ERROR,
-        ME,
-        "%s: DPP_BOOTSTRAP_GEN returned FAIL",
-        pEP->Name);
-
-    errno = 0;
-
-    char* end = NULL;
-
-    long id = strtol(reply, &end, 10);
-
-    ASSERT_TRUE(
-        errno == 0 &&
-        end != reply &&
-        *end == '\0' &&
-        id > 0 &&
-        id <= UINT32_MAX,
-        SWL_RC_ERROR,
-        ME,
-        "%s: invalid bootstrap id reply [%s]",
-        pEP->Name,
-        reply);
-
-    *bootstrapId = (uint32_t)id;
-
-    return SWL_RC_OK;
-}
-swl_rc_ne wld_wpaSupp_ep_dppBootstrapGetUri(
-        T_EndPoint* pEP,
-        uint32_t bootstrapId,
-        char* uri,
-        size_t uriSize)
-{
-    ASSERTS_NOT_NULL(pEP,
-                     SWL_RC_INVALID_PARAM,
-                     ME,
-                     "NULL");
-
-    ASSERTS_NOT_NULL(uri,
-                     SWL_RC_INVALID_PARAM,
-                     ME,
-                     "NULL");
-
-    ASSERTS_TRUE(uriSize > 0,
-                 SWL_RC_INVALID_PARAM,
-                 ME,
-                 "invalid uri size");
-
-    ASSERTS_TRUE(bootstrapId > 0,
-                 SWL_RC_INVALID_PARAM,
-                 ME,
-                 "invalid bootstrap id");
-
-    char cmd[128] = {0};
-
-    ASSERT_TRUE(
-        swl_str_catFormat(
-            cmd,
-            sizeof(cmd),
-            "DPP_BOOTSTRAP_GET_URI %u",
-            bootstrapId),
-        SWL_RC_ERROR,
-        ME,
-        "command build failed");
-
-    swl_rc_ne rc =
-        s_sendWpaSuppCommandReply(
-            pEP,
-            cmd,
-            uri,
-            uriSize);
-
-    ASSERT_TRUE(
-        swl_rc_isOk(rc),
-        rc,
-        ME,
-        "%s: DPP_BOOTSTRAP_GET_URI failed",
-        pEP->Name);
-
-    ASSERT_FALSE(
-        strcmp(uri, "FAIL") == 0,
-        SWL_RC_ERROR,
-        ME,
-        "%s: DPP_BOOTSTRAP_GET_URI returned FAIL",
-        pEP->Name);
-
-    ASSERT_TRUE(
-        strncmp(uri, "DPP:", 4) == 0,
-        SWL_RC_ERROR,
-        ME,
-        "%s: invalid URI [%s]",
-        pEP->Name,
-        uri);
-
-    return SWL_RC_OK;
-}
-amxd_status_t _EndPoint_dppBootstrapGen(
-        amxd_object_t* object,
-        amxd_function_t* func _UNUSED,
-        amxc_var_t* args,
-        amxc_var_t* retval)
-{
-    T_EndPoint* pEP = wld_ep_fromObj(
-        amxd_object_get_parent(object));
-
-    uint32_t bootstrapId = 0;
-
-    const char* params =
-        GET_CHAR_ARG(args, "params");
-
-    swl_rc_ne rc =
-        wld_wpaSupp_ep_dppBootstrapGen(
-            pEP,
-            params,
-            &bootstrapId);
-
-    ASSERT_TRUE(rc >= SWL_RC_OK,
-                amxd_status_unknown_error,
-                ME,
-                "DPP bootstrap gen failed");
-
-    amxc_var_add_key(
-        uint32_t,
-        retval,
-        "BootstrapId",
-        bootstrapId);
-
-    return amxd_status_ok;
-}
-
-amxd_status_t _EndPoint_dppBootstrapGetUri(
-        amxd_object_t* object,
-        amxd_function_t* func _UNUSED,
-        amxc_var_t* args,
-        amxc_var_t* retval)
-{
-    T_EndPoint* pEP = wld_ep_fromObj(
-        amxd_object_get_parent(object));
-
-    uint32_t bootstrapId =
-        GET_UINT32_ARG(args, "bootstrapId");
-
-    char uri[1024] = {0};
-
-    swl_rc_ne rc =
-        wld_wpaSupp_ep_dppBootstrapGetUri(
-            pEP,
-            bootstrapId,
-            uri,
-            sizeof(uri));
-
-    ASSERT_TRUE(rc >= SWL_RC_OK,
-                amxd_status_unknown_error,
-                ME,
-                "DPP bootstrap get uri failed");
-
-    amxc_var_add_key(
-        cstring_t,
-        retval,
-        "URI",
-        uri);
-
-    return amxd_status_ok;
-}
+EndPoint.DPP.dppBootstrapGen()
+EndPoint.DPP.dppBootstrapGetUri()
+using native:
+Plain text
+DPP_BOOTSTRAP_GEN
+DPP_BOOTSTRAP_GET_URI
+commands.
+Before implementing further APIs I need confirmation on:
+Plain text
+Expected onboarding flow
+Expected Configurator location
+Push Button vs WPS_PBC
+Controller GAS ownership
