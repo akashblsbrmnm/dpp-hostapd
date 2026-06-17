@@ -1,440 +1,65 @@
-// Required includes at implementation file level
-#include <openssl/evp.h>
-#include <cerrno>
-#include <cstdlib>
-#include <algorithm>
-#include <cctype>
-
-bool db::parse_dpp_bootstrap_info(const std::string& alias,
-                                  const std::string& dpp_uri,
-                                  std::string& error)
+bool Controller::handle_cmdu_1905_dpp_bootstrapping_uri_notification(
+    const sMacAddr &src_mac, ieee1905_1::CmduMessageRx &cmdu_rx)
 {
-    error.clear();
-
-    // -------------------------------------------------------------------------
-    // 1. URI Normalization
-    // -------------------------------------------------------------------------
-    std::string uri_normalized = dpp_uri;
-    beerocks::string_utils::trim(uri_normalized);
-
-    static const std::string prefix = "DPP:";
-    static const std::string suffix = ";;";
-
-    if (uri_normalized.compare(0, prefix.size(), prefix) != 0) {
-        error = "missing DPP prefix";
+    auto uri_tlv = cmdu_rx.getClass<wfa_map::tlvDppBootstrappingUriNotification>();
+    if (!uri_tlv) {
+        LOG(ERROR) << "wfa_map::tlvDppBootstrappingUriNotification missing";
         return false;
     }
 
-    if ((uri_normalized.size() < suffix.size()) ||
-        (uri_normalized.compare(uri_normalized.size() - suffix.size(),
-                                suffix.size(),
-                                suffix) != 0)) {
-        error = "missing DPP suffix";
+    const auto dpp_uri = uri_tlv->dpp_uri_str();
+    if (dpp_uri.empty()) {
+        LOG(WARNING) << "DPP bootstrapping URI notification with empty URI";
         return false;
     }
 
-    std::string body =
-        uri_normalized.substr(prefix.size(),
-                              uri_normalized.size() - prefix.size() - suffix.size());
+    // 1. Auto-generate an alias using the TLV's Enrollee MAC
+    sMacAddr enrollee_mac = uri_tlv->backhaul_sta_address();
+    if (enrollee_mac == beerocks::net::network_utils::ZERO_MAC) {
+        enrollee_mac = uri_tlv->bssid(); // Fallback if bSTA MAC is missing
+    }
 
-    if (body.empty()) {
-        error = "empty DPP payload";
+    std::string mac_str = tlvf::mac_to_string(enrollee_mac);
+    std::string alias = "auto-" + mac_str;
+    
+    // Optional: Clean colons from the alias (e.g. "auto-aa:bb" -> "auto-aabb")
+    alias.erase(std::remove(alias.begin(), alias.end(), ':'), alias.end());
+
+    // 2. Parse and store into the new map architecture
+    std::string error;
+    if (!m_database.parse_dpp_bootstrap_info(alias, dpp_uri, error)) {
+        LOG(WARNING) << "Failed parsing DPP bootstrapping URI: " << error;
         return false;
     }
 
-    // -------------------------------------------------------------------------
-    // 2. Field Parsing
-    //
-    // Note: dpp_bootstrap_info_map is NOT modified until the very end.
-    //       Parse failures leave any existing entry for this alias untouched.
-    // -------------------------------------------------------------------------
-    sDppBootstrappingInfo info;
-    info.alias = alias;
-    info.uri   = uri_normalized; // [point 6] preserve original URI for EasyMesh flows
-
-    bool seen_c = false;
-    bool seen_m = false;
-    bool seen_i = false;
-    bool seen_v = false;
-    bool seen_h = false;
-    bool seen_k = false;
-
-    std::vector<std::string> fields =
-        beerocks::string_utils::str_split(body, ';');
-
-    for (const auto& field : fields) {
-
-        if (field.empty()) {
-            continue;
+    // 3. Retrieve a pointer to the stored struct to update missing data
+    auto info = m_database.get_dpp_bootstrap_info(alias);
+    if (info) {
+        // If the URI payload didn't contain an 'M:' field, populate it from the TLV
+        if (info->mac == beerocks::net::network_utils::ZERO_MAC &&
+            enrollee_mac != beerocks::net::network_utils::ZERO_MAC) {
+            
+            info->mac = enrollee_mac;
+            LOG(DEBUG) << "Updated missing MAC in DPP info using TLV data";
         }
 
-        size_t sep = field.find(':');
-
-        if ((sep == std::string::npos) || (sep == 0)) {
-            error = "invalid field format";
-            return false;
-        }
-
-        // DPP spec: all field keys are exactly one character
-        if (sep != 1) {
-            error = "invalid DPP field name (must be single character)";
-            return false;
-        }
-
-        char key          = field[0];
-        std::string value = field.substr(sep + 1);
-
-        // [point 1] Do NOT reject empty values globally here.
-        //           Future DPP revisions may define optional fields
-        //           with empty values. Each known handler validates
-        //           its own value where required.
-
-        switch (key) {
-
-        // ---------------------------------------------------------------------
-        // C: Channel list  e.g. C:81/6,115/36
-        // ---------------------------------------------------------------------
-        case 'C': {
-            if (seen_c) {
-                error = "duplicate C field";
-                return false;
-            }
-            seen_c = true;
-
-            // [point 1] validate here, not globally
-            if (value.empty()) {
-                error = "empty value for C field";
-                return false;
-            }
-
-            auto pairs = beerocks::string_utils::str_split(value, ',');
-
-            for (const auto& pair : pairs) {
-
-                auto parts = beerocks::string_utils::str_split(pair, '/');
-
-                if (parts.size() != 2) {
-                    error = "invalid channel pair (expected op_class/channel): " + pair;
-                    return false;
-                }
-
-                char* end = nullptr;
-                errno     = 0;
-
-                long op_class = strtol(parts[0].c_str(), &end, 10);
-
-                if ((errno != 0) ||
-                    (end == parts[0].c_str()) ||
-                    (*end != '\0') ||
-                    (op_class < 0) ||
-                    (op_class > 255)) {
-                    error = "invalid operating class: " + parts[0];
-                    return false;
-                }
-
-                errno        = 0;
-                long channel = strtol(parts[1].c_str(), &end, 10);
-
-                if ((errno != 0) ||
-                    (end == parts[1].c_str()) ||
-                    (*end != '\0') ||
-                    (channel < 0) ||
-                    (channel > 255)) {
-                    error = "invalid channel: " + parts[1];
-                    return false;
-                }
-
-                // [point 4] container-agnostic duplicate check — keep this form,
-                //           do not rely on emplace return value (container type unknown)
-                for (const auto& existing : info.operating_class_channel) {
-                    if (existing.first  == static_cast<uint8_t>(op_class) &&
-                        existing.second == static_cast<uint8_t>(channel)) {
-                        error = "duplicate operating class/channel pair: " + pair;
-                        return false;
-                    }
-                }
-
-                info.operating_class_channel.emplace(
-                    static_cast<uint8_t>(op_class),
-                    static_cast<uint8_t>(channel));
-            }
-            break;
-        }
-
-        // ---------------------------------------------------------------------
-        // M: MAC address  e.g. M:aabbccddeeff  (12 lowercase hex chars, no colons)
-        // ---------------------------------------------------------------------
-        case 'M': {
-            if (seen_m) {
-                error = "duplicate M field";
-                return false;
-            }
-            seen_m = true;
-
-            // [point 1] validate here
-            if (value.empty()) {
-                error = "empty value for M field";
-                return false;
-            }
-
-            if (value.length() != 12) {
-                error = "invalid DPP MAC length (expected 12 hex chars, got "
-                        + std::to_string(value.length()) + ")";
-                return false;
-            }
-
-            if (!std::all_of(value.begin(), value.end(),
-                             [](unsigned char c) { return std::isxdigit(c); })) {
-                error = "invalid DPP MAC (non-hex characters)";
-                return false;
-            }
-
-            // Insert colons: aabbccddeeff -> aa:bb:cc:dd:ee:ff
-            std::string mac_colon;
-            mac_colon.reserve(17);
-            for (size_t i = 0; i < value.size(); i += 2) {
-                if (i) mac_colon += ':';
-                mac_colon += value.substr(i, 2);
-            }
-
-            // [point 3] parse once into binary, then convert — avoid double parse
-            uint8_t mac_bin[ETH_ALEN];
-            if (!tlvf::mac_from_string(mac_bin, mac_colon)) {
-                error = "failed to parse MAC address: " + mac_colon;
-                return false;
-            }
-            info.mac = tlvf::mac_from_array(mac_bin); // use binary form directly
-            break;
-        }
-
-        // ---------------------------------------------------------------------
-        // I: Device info string (free-form, may be empty per spec)
-        // ---------------------------------------------------------------------
-        case 'I': {
-            if (seen_i) {
-                error = "duplicate I field";
-                return false;
-            }
-            seen_i    = true;
-            info.info = value; // empty is valid for I
-            break;
-        }
-
-        // ---------------------------------------------------------------------
-        // V: DPP version  e.g. V:2
-        // ---------------------------------------------------------------------
-        case 'V': {
-            if (seen_v) {
-                error = "duplicate V field";
-                return false;
-            }
-            seen_v = true;
-
-            // [point 1] validate here
-            if (value.empty()) {
-                error = "empty value for V field";
-                return false;
-            }
-
-            char* end = nullptr;
-            errno     = 0;
-
-            long version = strtol(value.c_str(), &end, 10);
-
-            if ((errno != 0) ||
-                (end == value.c_str()) ||
-                (*end != '\0') ||
-                (version < 0) ||
-                (version > 255)) {
-                error = "invalid version: " + value;
-                return false;
-            }
-
-            info.version = static_cast<uint8_t>(version);
-            break;
-        }
-
-        // ---------------------------------------------------------------------
-        // H: Host  e.g. H:192.168.1.1  (free-form, may be hostname or IP)
-        // ---------------------------------------------------------------------
-        case 'H': {
-            if (seen_h) {
-                error = "duplicate H field";
-                return false;
-            }
-            seen_h    = true;
-            info.host = value; // empty is valid for H
-            break;
-        }
-
-        // ---------------------------------------------------------------------
-        // K: Bootstrapping public key (Base64URL, no padding)
-        //    Contains a DER/SPKI-encoded EC public key.
-        // ---------------------------------------------------------------------
-        case 'K': {
-            if (seen_k) {
-                error = "duplicate K field";
-                return false;
-            }
-            seen_k = true;
-
-            // [point 1] K must never be empty
-            if (value.empty()) {
-                error = "empty value for K field";
-                return false;
-            }
-
-            info.public_key = value;
-
-            // -----------------------------------------------------------------
-            // Step 1: Pre-validate Base64URL alphabet.
-            //         Valid chars: A-Z a-z 0-9 - _
-            //         No whitespace, '+', '/', or '=' expected in URL-safe form.
-            //         This is required before EVP_DecodeBlock: OpenSSL will
-            //         silently misbehave on whitespace in the input.
-            // -----------------------------------------------------------------
-            for (unsigned char c : value) {
-                if (!std::isalnum(c) && c != '-' && c != '_') {
-                    error = std::string("invalid character in public key base64url: '")
-                            + static_cast<char>(c) + "'";
-                    return false;
-                }
-            }
-
-            // -----------------------------------------------------------------
-            // Step 2: Convert Base64URL -> standard Base64
-            // -----------------------------------------------------------------
-            std::string b64 = value;
-            std::replace(b64.begin(), b64.end(), '-', '+');
-            std::replace(b64.begin(), b64.end(), '_', '/');
-
-            // -----------------------------------------------------------------
-            // Step 3: Restore '=' padding to make length a multiple of 4.
-            //         A remainder of 1 is always a malformed encoding.
-            // -----------------------------------------------------------------
-            int padding = 0;
-            switch (b64.size() % 4) {
-            case 0: break;
-            case 2: b64 += "=="; padding = 2; break;
-            case 3: b64 += "=";  padding = 1; break;
-            case 1:
-            default:
-                error = "invalid base64url length in public key (remainder 1 is never valid)";
-                return false;
-            }
-
-            // -----------------------------------------------------------------
-            // Step 4: Decode with EVP_DecodeBlock.
-            //
-            //   EVP_DecodeBlock always writes exactly (input_len/4)*3 bytes
-            //   into the output buffer regardless of padding content.
-            //   We correct for this in step 5.
-            //
-            //   Safe to use here because step 1 guarantees no whitespace or
-            //   newlines in the input, which would otherwise corrupt the output.
-            // -----------------------------------------------------------------
-            std::vector<uint8_t> decoded_key((b64.size() / 4) * 3);
-
-            int out_len = EVP_DecodeBlock(
-                decoded_key.data(),
-                reinterpret_cast<const unsigned char*>(b64.data()),
-                static_cast<int>(b64.size()));
-
-            if (out_len < 0) {
-                error = "OpenSSL EVP_DecodeBlock failed on public key";
-                return false;
-            }
-
-            // -----------------------------------------------------------------
-            // Step 5: Subtract padding bytes.
-            //         EVP_DecodeBlock writes them as 0x00 but they are not
-            //         real decoded data.
-            // -----------------------------------------------------------------
-            out_len -= padding;
-
-            if (out_len <= 0) {
-                error = "base64url decode of public key yielded empty result";
-                return false;
-            }
-
-            // [point 5] Keep the minimum-length guard but with accurate comment.
-            //           DPP K field is a DER/SPKI-encoded EC public key;
-            //           real keys are significantly larger than 32 bytes.
-            //           This check only rejects obviously malformed inputs.
-            if (out_len < 32) {
-                error = "decoded public key too short ("
-                        + std::to_string(out_len)
-                        + " bytes); real DPP keys are significantly larger";
-                return false;
-            }
-
-            const size_t decoded_len = static_cast<size_t>(out_len);
-
-            LOG(DEBUG) << "Decoded DPP public key for alias " << alias
-                       << ": " << decoded_len << " bytes";
-
-            // -----------------------------------------------------------------
-            // Step 6: SHA-256 over the exact decoded bytes.
-            // -----------------------------------------------------------------
-            mapf::encryption::sha256 sha;
-
-            if (!sha.update(decoded_key.data(), decoded_len) ||
-                !sha.digest(info.pkhash.data())) {
-                error = "failed to compute SHA-256 hash of public key";
-                return false;
-            }
-
-            info.pkhash_valid = true;
-            info.pkhash_hex   = hex_string_from_bytes(info.pkhash.data(),
-                                                      info.pkhash.size());
-            break;
-        }
-
-        // ---------------------------------------------------------------------
-        // Unknown fields: silently ignored per DPP spec extensibility rules.
-        // Empty values for unknown fields are also permitted (see point 1).
-        // ---------------------------------------------------------------------
-        default:
-            LOG(DEBUG) << "Ignoring unknown DPP field '" << key
-                       << "' for alias " << alias;
-            break;
-        }
+        LOG(INFO) << "Received DPP bootstrapping URI from proxy " << src_mac
+                  << " ruid=" << tlvf::mac_to_string(uri_tlv->ruid())
+                  << " bssid=" << tlvf::mac_to_string(uri_tlv->bssid())
+                  << " backhaul_sta=" << tlvf::mac_to_string(uri_tlv->backhaul_sta_address())
+                  << " generated_alias=" << alias
+                  // We removed the hex string from the struct earlier to save memory, 
+                  // so generate it here just for the log:
+                  << " pkhash=" << hex_string_from_bytes(info->pkhash.data(), 32);
     }
-
-    // -------------------------------------------------------------------------
-    // 3. Mandatory field enforcement
-    // -------------------------------------------------------------------------
-    if (!seen_k) {
-        error = "missing mandatory K field (public key)";
-        return false;
-    }
-
-    if (!info.pkhash_valid) {
-        // Unreachable if K handler is correct; kept as a defensive safeguard
-        error = "internal error: public key hash not generated";
-        return false;
-    }
-
-    // -------------------------------------------------------------------------
-    // 4. Commit to the map
-    //
-    //    [point 2] This is intentionally the only place we touch the map.
-    //    Any parse failure above leaves an existing entry for this alias intact.
-    //
-    //    [point 9] operator[] semantics:
-    //      - alias absent  -> insert new entry
-    //      - alias present -> replace existing entry (desired update behavior)
-    // -------------------------------------------------------------------------
-    dpp_bootstrap_info_map[alias] = std::move(info);
-
-    // [point 10] Preserve raw URI string for EasyMesh DPP flows that need
-    //            to retransmit the original bootstrapping URI.
-    m_dpp_bootstrapping_uri_value = uri_normalized;
-
-    LOG(INFO) << "Stored DPP bootstrap info:"
-              << " alias="   << alias
-              << " entries=" << dpp_bootstrap_info_map.size()
-              << " pkhash="  << dpp_bootstrap_info_map[alias].pkhash_hex;
 
     return true;
+}
+db::sDppBootstrappingInfo* db::get_dpp_bootstrap_info(const std::string &alias)
+{
+    auto it = dpp_bootstrap_info_map.find(alias);
+    if (it != dpp_bootstrap_info_map.end()) {
+        return &it->second;
+    }
+    return nullptr;
 }
