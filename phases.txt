@@ -1,0 +1,561 @@
+Given what you've completed and your goal (EasyMesh R7 DPP onboarding including Push Button onboarding), I would not continue coding randomly. The remaining work has dependencies.
+
+The order below minimizes rework and follows the EasyMesh architecture.
+
+Current Status
+
+Complete
+
+PWHM
+
+AP DPP Bootstrap Gen
+
+AP DPP Bootstrap Get URI
+
+STA DPP Bootstrap Gen
+
+STA DPP Bootstrap Get URI
+
+
+HAL
+
+AP HAL wrappers
+
+STA HAL wrappers
+
+
+Controller
+
+DPP URI parser
+
+DPP URI storage
+
+PKHash generation
+
+PKHash database
+
+
+UCC
+
+DPP URI provisioning
+
+
+
+---
+
+Not Complete
+
+EasyMesh CMDUs
+
+Unknown status:
+
+DPP Bootstrapping URI Notification
+Chirp Notification
+Proxied Encap DPP
+Direct Encap DPP
+DPP CCE Indication
+
+Authentication transport
+
+Not implemented.
+
+GAS transport
+
+Not implemented.
+
+Push Button onboarding
+
+Not implemented.
+
+WPS-DPP integration
+
+Not verified.
+
+
+---
+
+Phase 1
+
+Inventory Existing DPP Infrastructure
+
+Do this before writing code.
+
+Create spreadsheet:
+
+Item	Exists	Encode	Decode	TX	RX
+
+DPP URI Notification					
+Chirp Notification					
+CCE Indication					
+Proxied Encap DPP					
+Direct Encap DPP					
+
+
+Search:
+
+grep -R "DPP" controller/
+grep -R "DPP" agent/
+grep -R "tlvDpp" framework/
+grep -R "ENCAP_DPP" .
+grep -R "CHIRP" .
+grep -R "CCE" .
+
+Goal:
+
+Understand what already exists.
+
+
+---
+
+Phase 2
+
+Verify Hostapd/Wpa Supplicant Reality
+
+Most important investigation.
+
+Do NOT implement EasyMesh logic before this.
+
+Need answers:
+
+hostapd
+
+Can it:
+
+extract DPP URI from M7
+emit URI event
+skip M8 credentials
+
+?
+
+wpa_supplicant
+
+Can it:
+
+embed DPP URI in M7
+
+?
+
+Need actual proof.
+
+Search:
+
+grep -R "1BBB" hostapd/
+grep -R "DPP_URI" hostapd/
+grep -R "WPS-DPP" hostapd/
+grep -R "dpp_uri_no_cred" hostapd/
+grep -R "skip_cred" hostapd/
+
+Result determines everything.
+
+
+---
+
+Decision Point
+
+If support exists:
+
+Continue.
+
+If support does not exist:
+
+Stop.
+
+Patch hostapd and wpa_supplicant first.
+
+Nothing else matters until URI transport exists.
+
+
+---
+
+Phase 3
+
+Complete DPP URI Transport
+
+Flow:
+
+Enrollee
+   |
+WPS M7
+   |
+Proxy Agent
+   |
+DPP URI Notification CMDU
+   |
+Controller
+
+Implement:
+
+STA
+
+When WPS starts:
+
+dppBootstrapGen()
+dppBootstrapGetUri()
+
+Retrieve URI.
+
+Inject into onboarding path.
+
+
+---
+
+AP
+
+When M7 arrives:
+
+Extract URI.
+
+Generate event.
+
+Forward URI to controller.
+
+
+---
+
+Controller
+
+Receive:
+
+DPP Bootstrapping URI Notification
+
+Store:
+
+parse_dpp_bootstrap_info()
+
+Milestone:
+
+Controller receives URI dynamically.
+
+
+---
+
+Phase 4
+
+Chirp Matching
+
+Now your PKHash work becomes useful.
+
+Implement:
+
+Agent
+
+Receive chirp.
+
+Generate:
+
+Chirp Notification
+
+CMDU.
+
+
+---
+
+Controller
+
+Receive:
+
+hash
+
+Compare:
+
+SHA256(Bootstrap Public Key)
+==
+Chirp Hash
+
+Store:
+
+Agent MAC
+Enrollee MAC
+Proxy Agent
+
+Milestone:
+
+Controller identifies enrollee.
+
+
+---
+
+Phase 5
+
+CCE
+
+Implement:
+
+DPP_CCE_INDICATION
+
+Controller:
+
+ENABLE
+
+Agent:
+
+Advertise Configurator Connectivity Element
+
+Controller:
+
+DISABLE
+
+after completion.
+
+Milestone:
+
+Configurator discoverable.
+
+
+---
+
+Phase 6
+
+Authentication Transport
+
+Do NOT implement crypto.
+
+Just transport.
+
+Need:
+
+CMDUs
+
+Authentication Request
+Authentication Response
+Authentication Confirm
+
+wrapped in:
+
+Proxied Encap DPP
+
+Flow:
+
+Controller
+  ->
+Agent
+  ->
+Enrollee
+
+and back.
+
+Milestone:
+
+Authentication frames traverse EasyMesh.
+
+
+---
+
+Phase 7
+
+GAS Transport
+
+Your teammate owns configuration generation.
+
+You likely own transport.
+
+Need:
+
+GAS Request
+GAS Response
+
+inside:
+
+Proxied Encap DPP
+
+CMDUs.
+
+Milestone:
+
+Controller and enrollee exchange GAS messages.
+
+
+---
+
+Phase 8
+
+Configuration Result
+
+Implement:
+
+Configuration Result
+
+handling.
+
+Need:
+
+Success
+Failure
+
+processing.
+
+Milestone:
+
+Controller knows onboarding outcome.
+
+
+---
+
+Phase 9
+
+Connector Delivery
+
+Need:
+
+1905 DPP Connector
+
+delivery.
+
+Need:
+
+Agent stores connector
+
+Need:
+
+Secure 1905 channel
+
+activation.
+
+Milestone:
+
+Secure EasyMesh network operational.
+
+
+---
+
+Push Button Specific Track
+
+Run in parallel.
+
+
+---
+
+PB-1
+
+Verify EasyMesh R7 interpretation.
+
+Determine whether company implementation expects:
+
+WPS M7 DPP URI transport
+
+or
+
+Pure EasyConnect Push Button PKEX
+
+These are different flows.
+
+EasyMesh 5.3.6 says:
+
+WPS carries URI
+Then DPP starts later
+
+
+---
+
+PB-2
+
+Implement URI transport first.
+
+Without URI transport:
+
+Push Button onboarding cannot start.
+
+
+---
+
+PB-3
+
+After URI transport works
+
+Implement:
+
+Chirp Notification
+
+Then:
+
+Authentication
+GAS
+Configuration
+
+
+---
+
+What I would do next week
+
+Day 1:
+
+Inventory all DPP TLVs
+Inventory all DPP CMDUs
+
+Day 2:
+
+Verify hostapd support
+Verify wpa_supplicant support
+
+Day 3:
+
+Implement DPP URI Notification CMDU
+
+Day 4:
+
+End-to-end URI transport
+
+Day 5:
+
+Implement Chirp Notification
+
+Only after URI transport and Chirp matching work would I move to Authentication/GAS. Those are much larger pieces and depend on the earlier phases being solid.
+
+GEMINI
+
+Based on the extensive code changes you have already made and the Wi-Fi EasyMesh v6.1 specifications, you have successfully built a **rock-solid foundation** for the Device Provisioning Protocol (DPP).
+You have completed the entire data model, the IPC wrappers for the Wi-Fi daemons, the HAL, and a highly secure Controller database parser.
+Here is the comprehensive analysis of what is done, what is pending, and the exact, prioritized **Implementation Plan** to integrate the remaining EasyMesh DPP Push Button flow.
+### 🟢 Phase 0: The Foundation (Completed)
+You have successfully finished the prerequisites. Do not spend any more time on these unless a bug arises:
+ 1. **Daemon Interfaces:** pwhm can generate and retrieve DPP URIs from hostapd and wpa_supplicant.
+ 2. **HAL & ODL Exposure:** prplOS and prplmesh can call the dppBootstrapGen and dppBootstrapGetUri via Ambiorix.
+ 3. **Controller Northbound API:** The TR-181 datamodel is ready to accept ProvisionedDPP objects.
+ 4. **Controller Database:** A highly secure, zero-allocation C++14 parser (parse_dpp_bootstrap_info) correctly parses, hashes (pkhash), and stores Enrollee URIs.
+ 5. **UCC Testing Hooks:** The test framework can successfully inject provisioned URIs into your new database.
+### 🔴 Phase 1: The Push-Button Transport (Next Immediate Priority)
+**Goal:** Modify the Enrollee to inject the URI into the WPS handshake, and have the Proxy AP extract it without generating standard Wi-Fi credentials.
+**Pending Tasks:**
+ 1. **Enrollee Agent WPS Trigger (sta_wlan_hal / bpl):**
+   * *What to do:* Locate the exact function where the Enrollee agent initiates WPS (e.g., wifiGen_ep_wpsStart or similar).
+   * *Integration:* Before sending the command, call your new dpp_bootstrap_get_uri() HAL function. Concatenate this into the WPS command string so wpa_supplicant receives: WPS_PBC multi_ap=1 dpp_uri=DPP:....
+ 2. **Proxy Agent 1905 TK Check (ap_manager):**
+   * *What to do:* When a physical button is pressed on the Proxy AP, the AP manager must evaluate its security state.
+   * *Integration:* If the Proxy AP has a valid 1905 Temporal Key (TK) with the Controller, it must issue SET dpp_uri_no_cred 1 to hostapd *before* issuing the WPS_PBC command. If no TK exists, it skips this to allow standard WPS fallback.
+ 3. **Proxy Agent Event Catcher (pwhm -> ap_manager):**
+   * *What to do:* hostapd will extract the URI from the M7 message and emit an asynchronous event.
+   * *Integration:* Add a listener in your wpaCtrlEvents loop for the string WPS-DPP-URI. Parse out the uri= and sta= (MAC) strings and pass them up to ap_manager.
+### 🔴 Phase 2: The 1905.1 URI Notification (Sprint 2)
+**Goal:** Send the intercepted URI from the Proxy Agent over the secure 1905.1 backhaul to the Controller.
+**Pending Tasks:**
+ 1. **TLV & CMDU Definitions (tlvf / beerocks_message):**
+   * *What to do:* Check your TLVF YAML/JSON definitions. You must ensure that **CMDU Type 0x8031** (DPP Bootstrapping URI Notification Message) and **TLV Type 0xD1** (DPP Message TLV) exist. If not, write the definitions.
+ 2. **Proxy Agent TX (ap_manager):**
+   * *Integration:* Upon receiving the URI from Phase 1, ap_manager constructs the 0x8031 CMDU, packs the URI into the 0xD1 TLV, and transmits it to the Controller.
+ 3. **Controller RX (controller_task / son_slave_thread):**
+   * *Integration:* Catch the 0x8031 CMDU on the Controller. Extract the URI and pass it to your recently finished parse_dpp_bootstrap_info() database function. *(Now the Controller dynamically knows about the Enrollee, just like it would if UCC provisioned it!)*
+### 🔴 Phase 3: Chirp Detection & Hash Matching (Sprint 3)
+**Goal:** The Enrollee begins broadcasting 802.11 Action frames (Chirps). The Proxy AP hears them and relays them to the Controller to find a match.
+**Pending Tasks:**
+ 1. **Proxy Agent Chirp Relay (hostapd -> ap_manager):**
+   * *What to do:* The Enrollee will start sending DPP Presence Announcements (Chirps) containing a hash. hostapd emits a DPP-RX event.
+   * *Integration:* ap_manager catches this event, extracts the hash, and packages it into a **DPP Chirp Notification Message (CMDU Type 0x8033)** to send to the Controller.
+ 2. **Controller Database Lookup API (db.cpp):**
+   * *What to do:* You currently have get_dpp_bootstrap_info_by_mac(). You need a new API: get_dpp_bootstrap_info_by_pkhash(const std::array<uint8_t, 32>& hash).
+ 3. **Controller Hash Matching:**
+   * *Integration:* The Controller receives the 0x8033 CMDU. It extracts the hash and calls get_dpp_bootstrap_info_by_pkhash(). If it finds the entry you saved in Phase 2, the Controller confirms the Enrollee is authentic.
+### 🔴 Phase 4: Authentication & GAS (Sprint 4 - Coordination Required)
+**Goal:** Securely establish the DPP keys and hand out the network configuration.
+**Pending Tasks:**
+ 1. **DPP Authentication (controller -> proxy -> enrollee):**
+   * *Integration:* Now that the chirp is matched, the Controller builds a **Proxied Encap DPP Message (CMDU Type 0x8032)** containing a DPP Authentication Request. The Proxy AP blindly unpacks this and sends it over the air to the Enrollee. They bounce this back and forth (Auth Request -> Auth Response -> Auth Confirm).
+ 2. **GAS Relay (Teammate Handoff):**
+   * *Integration:* The Enrollee requests the Wi-Fi credentials using GAS (Generic Advertisement Service). The Proxy AP must relay the GAS_INITIAL_REQUEST over 1905 to the Controller. *(You mentioned a teammate is working on GAS. This is the exact boundary where you hand the 1905 payload to their GAS state machine).*
+ 3. **Connector Generation:**
+   * *Integration:* The Controller signs a unique DPP Connector for the Enrollee and passes it back through the GAS Configuration Response.
+### Recommended Action Plan (What to code next)
+Do not jump straight into CMDUs yet. The easiest and most logical next step to unblock the entire pipeline is **Phase 1**.
+I recommend you create your next pull request specifically for:
+ 1. Fetching the URI and adding multi_ap=1 dpp_uri=... to the WPS_PBC string on the Enrollee.
+ 2. Creating the string parser in pwhm to catch the WPS-DPP-URI string event coming back from hostapd on the Proxy AP.
+Would you like to start architecting the C++ code for injecting the WPS_PBC string on the Enrollee, or do you need to define the tlvf structures for the 1905 CMDUs first?
