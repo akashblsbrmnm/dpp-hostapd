@@ -13,48 +13,129 @@ bool Controller::handle_cmdu_1905_dpp_bootstrapping_uri_notification(
         return false;
     }
 
-    // 1. Auto-generate an alias using the TLV's Enrollee MAC
+    // 1. Establish the MAC address from the TLV
     sMacAddr enrollee_mac = uri_tlv->backhaul_sta_address();
     if (enrollee_mac == beerocks::net::network_utils::ZERO_MAC) {
-        enrollee_mac = uri_tlv->bssid(); // Fallback if bSTA MAC is missing
+        enrollee_mac = uri_tlv->bssid(); // Fallback
     }
 
-    std::string mac_str = tlvf::mac_to_string(enrollee_mac);
-    std::string alias = "auto-" + mac_str;
-    
-    // Optional: Clean colons from the alias (e.g. "auto-aa:bb" -> "auto-aabb")
-    alias.erase(std::remove(alias.begin(), alias.end(), ':'), alias.end());
-
-    // 2. Parse and store into the new map architecture
+    // 2. Parse into the DB using a temporary alias
+    std::string temp_alias = "cmdu-temp-alias";
     std::string error;
-    if (!m_database.parse_dpp_bootstrap_info(alias, dpp_uri, error)) {
-        LOG(WARNING) << "Failed parsing DPP bootstrapping URI: " << error;
+    if (!m_database.parse_dpp_bootstrap_info(temp_alias, dpp_uri, error)) {
+        LOG(WARNING) << "Failed parsing DPP bootstrapping URI from CMDU: " << error;
         return false;
     }
 
-    // 3. Retrieve a pointer to the stored struct to update missing data
-    auto info = m_database.get_dpp_bootstrap_info(alias);
+    // 3. Retrieve the parsed struct to apply fixes and generate the real alias
+    auto* info = m_database.get_dpp_bootstrap_info(temp_alias);
     if (info) {
-        // If the URI payload didn't contain an 'M:' field, populate it from the TLV
+        // Repair missing MAC in the URI payload using the 1905 TLV metadata
         if (info->mac == beerocks::net::network_utils::ZERO_MAC &&
             enrollee_mac != beerocks::net::network_utils::ZERO_MAC) {
-            
             info->mac = enrollee_mac;
-            LOG(DEBUG) << "Updated missing MAC in DPP info using TLV data";
         }
 
-        LOG(INFO) << "Received DPP bootstrapping URI from proxy " << src_mac
-                  << " ruid=" << tlvf::mac_to_string(uri_tlv->ruid())
-                  << " bssid=" << tlvf::mac_to_string(uri_tlv->bssid())
-                  << " backhaul_sta=" << tlvf::mac_to_string(uri_tlv->backhaul_sta_address())
-                  << " generated_alias=" << alias
-                  // We removed the hex string from the struct earlier to save memory, 
-                  // so generate it here just for the log:
-                  << " pkhash=" << hex_string_from_bytes(info->pkhash.data(), 32);
+        // Generate the cryptographically unique alias: "auto-<mac>-<pkhash_prefix>"
+        std::string mac_str = tlvf::mac_to_string(info->mac);
+        mac_str.erase(std::remove(mac_str.begin(), mac_str.end(), ':'), mac_str.end());
+        
+        // Use the first 8 characters of the hex hash as the prefix
+        std::string hash_hex = hex_string_from_bytes(info->pkhash.data(), info->pkhash.size());
+        std::string hash_prefix = hash_hex.substr(0, 8);
+        
+        std::string real_alias = "auto-" + mac_str + "-" + hash_prefix;
+        info->alias = real_alias;
+
+        // Save under the permanent alias and remove the temporary one
+        m_database.add_dpp_bootstrap_info(real_alias, *info);
+        m_database.remove_dpp_bootstrap_info(temp_alias);
+
+        LOG(INFO) << "Ingested DPP URI from Agent " << src_mac
+                  << " | Enrollee MAC: " << tlvf::mac_to_string(info->mac)
+                  << " | Assigned Alias: " << real_alias;
     }
 
     return true;
 }
+
+
+bool controller_ucc_listener::handle_dev_exec_action(
+    const std::unordered_map<std::string, std::string> &params, std::string &err_string)
+{
+    auto action_type_it = params.find("dppactiontype");
+    if (action_type_it != params.end()) {
+        auto &action_type = action_type_it->second;
+        if (action_type != "SetPeerBootstrap") {
+            err_string = "DPPActionType is not 'SetPeerBootstrap', value is '" + action_type + "'";
+            return false;
+        }
+
+        auto dpp_bootstrapping_data_bytes_it = params.find("dppbootstrappingdata");
+        if (dpp_bootstrapping_data_bytes_it == params.end()) {
+            err_string = "DPPBootstrappingData is missing";
+            return false;
+        }
+
+        auto dpp_bootstrapping_data_str =
+            beerocks::string_utils::bytes_string_to_string(dpp_bootstrapping_data_bytes_it->second);
+
+        LOG(DEBUG) << "UCC bootstrapping data: " << dpp_bootstrapping_data_str;
+
+        // 1. Determine if we have an alias, or if we need to auto-generate one
+        std::string alias;
+        bool auto_generate_alias = false;
+        
+        auto alias_it = params.find("alias");
+        if (alias_it != params.end() && !alias_it->second.empty()) {
+            alias = alias_it->second;
+        } else {
+            alias = "ucc-temp-alias";
+            auto_generate_alias = true;
+        }
+
+        // 2. Tunnel the URI through our secure, zero-allocation database parser
+        if (!m_database.parse_dpp_bootstrap_info(alias, dpp_bootstrapping_data_str, err_string)) {
+            LOG(ERROR) << "UCC DPP URI parsing failed: " << err_string;
+            return false;
+        }
+
+        // 3. If no alias was provided, auto-generate it using the safely parsed MAC/Key
+        if (auto_generate_alias) {
+            // NOTE: Make sure get_dpp_bootstrap_info() is defined in your db.h!
+            auto* info = m_database.get_dpp_bootstrap_info(alias);
+            if (info) {
+                std::string real_alias;
+                
+                if (info->mac != beerocks::net::network_utils::ZERO_MAC) {
+                    std::string mac_str = tlvf::mac_to_string(info->mac);
+                    // Remove colons from the MAC string
+                    mac_str.erase(std::remove(mac_str.begin(), mac_str.end(), ':'), mac_str.end());
+                    real_alias = "cpe-" + mac_str;
+                } else {
+                    real_alias = "cpe-" + info->public_key.substr(0, std::min<size_t>(12, info->public_key.size()));
+                }
+                
+                // Update the internal alias field
+                info->alias = real_alias;
+                
+                // Save under the real alias and erase the temporary one
+                m_database.add_dpp_bootstrap_info(real_alias, *info);
+                m_database.remove_dpp_bootstrap_info("ucc-temp-alias");
+                
+                LOG(INFO) << "UCC Auto-generated alias: " << real_alias;
+            }
+        }
+
+        return true;
+    }
+    
+    err_string = "command is not supported on the Controller";
+    return false;
+}
+
+
+
 db::sDppBootstrappingInfo* db::get_dpp_bootstrap_info(const std::string &alias)
 {
     auto it = dpp_bootstrap_info_map.find(alias);
