@@ -1,146 +1,358 @@
-bool Controller::handle_cmdu_1905_dpp_bootstrapping_uri_notification(
-    const sMacAddr &src_mac, ieee1905_1::CmduMessageRx &cmdu_rx)
-{
-    auto uri_tlv = cmdu_rx.getClass<wfa_map::tlvDppBootstrappingUriNotification>();
-    if (!uri_tlv) {
-        LOG(ERROR) << "wfa_map::tlvDppBootstrappingUriNotification missing";
+db.h
+constexpr size_t MAX_DPP_HOST_LEN = 255;
+
+struct sDppBootstrappingInfo {
+    std::string alias;
+    std::string uri; 
+    sMacAddr mac = beerocks::net::network_utils::ZERO_MAC;
+    std::string info;
+    uint8_t version = 0;
+    std::string host;
+    std::string public_key;
+    
+    // Binary hash for DPP Chirp/CCE Indication matching
+    std::array<uint8_t, 32> pkhash = {}; 
+    
+    std::multimap<uint8_t, uint8_t> operating_class_channel;
+    
+    // Transport metadata
+    sMacAddr ruid = beerocks::net::network_utils::ZERO_MAC;
+    sMacAddr bssid = beerocks::net::network_utils::ZERO_MAC;
+};
+
+// Pure parser
+bool parse_dpp_bootstrap_info(const std::string& dpp_uri, 
+                              sDppBootstrappingInfo& info, 
+                              std::string& error);
+
+// Unified inserter
+bool add_dpp_bootstrap_info(const std::string &uri,
+                            const sMacAddr &enrollee_mac,
+                            const sMacAddr &bssid,
+                            const sMacAddr &ruid,
+                            std::string &error);
+
+// Database Accessors for Chirp and Configurator flows
+sDppBootstrappingInfo* get_dpp_bootstrap_info(const std::string& alias);
+const sDppBootstrappingInfo* get_dpp_bootstrap_info_by_pkhash(const std::array<uint8_t, 32>& pkhash) const;
+bool remove_dpp_bootstrap_info(const std::string& alias);
+
+db.cpp
+bool db::parse_dpp_bootstrap_info(const std::string& dpp_uri,
+                                  sDppBootstrappingInfo& info,
+                                  std::string& error) {
+    error.clear();
+    info = sDppBootstrappingInfo{};
+    info.uri = dpp_uri;
+
+    std::string uri_normalized = dpp_uri;
+    beerocks::string_utils::trim(uri_normalized);
+
+    static const std::string prefix = "DPP:";
+    static const std::string suffix = ";;";
+
+    if (uri_normalized.compare(0, prefix.size(), prefix) != 0) {
+        error = "missing DPP prefix";
         return false;
     }
 
-    const auto dpp_uri = uri_tlv->dpp_uri_str();
-    if (dpp_uri.empty()) {
-        LOG(WARNING) << "DPP bootstrapping URI notification with empty URI";
+    if ((uri_normalized.size() < suffix.size()) ||
+        (uri_normalized.compare(uri_normalized.size() - suffix.size(), suffix.size(), suffix) != 0)) {
+        error = "missing DPP suffix";
         return false;
     }
 
-    // 1. Establish the MAC address from the TLV
-    sMacAddr enrollee_mac = uri_tlv->backhaul_sta_address();
-    if (enrollee_mac == beerocks::net::network_utils::ZERO_MAC) {
-        enrollee_mac = uri_tlv->bssid(); // Fallback
-    }
+    std::string body = uri_normalized.substr(prefix.size(), uri_normalized.size() - prefix.size() - suffix.size());
 
-    // 2. Parse into the DB using a temporary alias
-    std::string temp_alias = "cmdu-temp-alias";
-    std::string error;
-    if (!m_database.parse_dpp_bootstrap_info(temp_alias, dpp_uri, error)) {
-        LOG(WARNING) << "Failed parsing DPP bootstrapping URI from CMDU: " << error;
+    if (body.empty()) {
+        error = "empty DPP payload";
         return false;
     }
 
-    // 3. Retrieve the parsed struct to apply fixes and generate the real alias
-    auto* info = m_database.get_dpp_bootstrap_info(temp_alias);
-    if (info) {
-        // Repair missing MAC in the URI payload using the 1905 TLV metadata
-        if (info->mac == beerocks::net::network_utils::ZERO_MAC &&
-            enrollee_mac != beerocks::net::network_utils::ZERO_MAC) {
-            info->mac = enrollee_mac;
+    bool seen_c = false, seen_m = false, seen_i = false, seen_v = false, seen_h = false, seen_k = false;
+    std::vector<std::string> fields = beerocks::string_utils::str_split(body, ';');
+
+    for (const auto& field : fields) {
+        if (field.empty()) continue;
+
+        size_t sep = field.find(':');
+        if ((sep == std::string::npos) || (sep == 0) || (sep != 1)) {
+            error = "invalid DPP field format";
+            return false;
         }
 
-        // Generate the cryptographically unique alias: "auto-<mac>-<pkhash_prefix>"
-        std::string mac_str = tlvf::mac_to_string(info->mac);
-        mac_str.erase(std::remove(mac_str.begin(), mac_str.end(), ':'), mac_str.end());
-        
-        // Use the first 8 characters of the hex hash as the prefix
-        std::string hash_hex = hex_string_from_bytes(info->pkhash.data(), info->pkhash.size());
-        std::string hash_prefix = hash_hex.substr(0, 8);
-        
-        std::string real_alias = "auto-" + mac_str + "-" + hash_prefix;
-        info->alias = real_alias;
+        char key = field[0];
+        std::string value = field.substr(sep + 1);
 
-        // Save under the permanent alias and remove the temporary one
-        m_database.add_dpp_bootstrap_info(real_alias, *info);
-        m_database.remove_dpp_bootstrap_info(temp_alias);
+        if (value.empty()) {
+            error = std::string("empty value for DPP field '") + key + "'";
+            return false;
+        }
 
-        LOG(INFO) << "Ingested DPP URI from Agent " << src_mac
-                  << " | Enrollee MAC: " << tlvf::mac_to_string(info->mac)
-                  << " | Assigned Alias: " << real_alias;
+        switch (key) {
+        case 'C': {
+            if (seen_c) { error = "duplicate C field"; return false; }
+            seen_c = true;
+
+            auto pairs = beerocks::string_utils::str_split(value, ',');
+            for (const auto& pair : pairs) {
+                auto parts = beerocks::string_utils::str_split(pair, '/');
+                if (parts.size() != 2) { error = "invalid channel list"; return false; }
+
+                char* end = nullptr;
+                errno = 0;
+                long op_class = strtol(parts[0].c_str(), &end, 10);
+                if ((errno != 0) || (end == parts[0].c_str()) || (*end != '\0') || (op_class < 0) || (op_class > 255)) {
+                    error = "invalid operating class";
+                    return false;
+                }
+
+                errno = 0;
+                long channel = strtol(parts[1].c_str(), &end, 10);
+                if ((errno != 0) || (end == parts[1].c_str()) || (*end != '\0') || (channel < 0) || (channel > 255)) {
+                    error = "invalid channel";
+                    return false;
+                }
+
+                for (const auto& existing : info.operating_class_channel) {
+                    if (existing.first == op_class && existing.second == channel) {
+                        error = "duplicate operating class/channel pair";
+                        return false;
+                    }
+                }
+                info.operating_class_channel.emplace(static_cast<uint8_t>(op_class), static_cast<uint8_t>(channel));
+            }
+            
+            if (info.operating_class_channel.empty()) {
+                error = "empty channel list";
+                return false;
+            }
+            break;
+        }
+        case 'M': {
+            if (seen_m) { error = "duplicate M field"; return false; }
+            seen_m = true;
+
+            if (value.length() != 12) { error = "invalid DPP MAC length"; return false; }
+
+            if (!std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isxdigit(c); })) {
+                error = "invalid DPP MAC";
+                return false;
+            }
+
+            std::string mac_colon;
+            mac_colon.reserve(17);
+            for (size_t i = 0; i < value.size(); i += 2) {
+                if (i) mac_colon += ":";
+                mac_colon += value.substr(i, 2);
+            }
+
+            uint8_t mac_bin[ETH_ALEN];
+            if (!tlvf::mac_from_string(mac_bin, mac_colon)) { 
+                error = "failed to parse MAC"; 
+                return false; 
+            }
+            info.mac = tlvf::mac_from_array(mac_bin);
+            break;
+        }
+        case 'I': {
+            if (seen_i) { error = "duplicate I field"; return false; }
+            seen_i = true;
+            info.info = value;
+            break;
+        }
+        case 'V': {
+            if (seen_v) { error = "duplicate V field"; return false; }
+            seen_v = true;
+
+            char* end = nullptr;
+            errno = 0;
+            long version = strtol(value.c_str(), &end, 10);
+            
+            if ((errno != 0) || (end == value.c_str()) || (*end != '\0') || (version < 0) || (version > 255)) {
+                error = "invalid version";
+                return false;
+            }
+            info.version = static_cast<uint8_t>(version);
+            break;
+        }
+        case 'H': {
+            if (seen_h) { error = "duplicate H field"; return false; }
+            seen_h = true;
+            
+            if (value.size() > MAX_DPP_HOST_LEN) {
+                error = "Host field too long";
+                return false;
+            }
+            info.host = value;
+            break;
+        }
+        case 'K': {
+            if (seen_k) { error = "duplicate K field"; return false; }
+            seen_k = true;
+
+            info.public_key = value;
+
+            if (!std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                    return std::isalnum(c) || c == '-' || c == '_'; })) {
+                error = "invalid character in public key base64url";
+                return false;
+            }
+
+            std::string b64_std = value;
+            std::replace(b64_std.begin(), b64_std.end(), '-', '+');
+            std::replace(b64_std.begin(), b64_std.end(), '_', '/');
+
+            int padding_added = 0;
+            switch (b64_std.length() % 4) {
+            case 2: b64_std += "=="; padding_added = 2; break;
+            case 3: b64_std += "=";  padding_added = 1; break;
+            case 1: error = "invalid base64url length in public key"; return false;
+            case 0: break;
+            }
+
+            std::vector<uint8_t> decoded(b64_std.length());
+            int out_len = EVP_DecodeBlock(decoded.data(),
+                                          reinterpret_cast<const unsigned char*>(b64_std.data()),
+                                          b64_std.length());
+
+            if (out_len < 0) { error = "OpenSSL base64 decode failed"; return false; }
+
+            out_len -= padding_added;
+
+            if (out_len < 32) { 
+                error = "decoded public key too short"; 
+                return false; 
+            }
+
+            size_t decoded_len = static_cast<size_t>(out_len);
+            mapf::encryption::sha256 sha;
+
+            if (!sha.update(decoded.data(), decoded_len) || !sha.digest(info.pkhash.data())) {
+                error = "failed to hash public key";
+                return false;
+            }
+            break;
+        }
+        default:
+            LOG(DEBUG) << "Ignoring unknown DPP key: " << key;
+            break;
+        }
+    }
+
+    if (!seen_k) {
+        error = "missing mandatory K field";
+        return false;
     }
 
     return true;
 }
 
-
-bool controller_ucc_listener::handle_dev_exec_action(
-    const std::unordered_map<std::string, std::string> &params, std::string &err_string)
+bool db::add_dpp_bootstrap_info(const std::string &uri,
+                                const sMacAddr &enrollee_mac,
+                                const sMacAddr &bssid,
+                                const sMacAddr &ruid,
+                                std::string &error)
 {
-    auto action_type_it = params.find("dppactiontype");
-    if (action_type_it != params.end()) {
-        auto &action_type = action_type_it->second;
-        if (action_type != "SetPeerBootstrap") {
-            err_string = "DPPActionType is not 'SetPeerBootstrap', value is '" + action_type + "'";
-            return false;
-        }
-
-        auto dpp_bootstrapping_data_bytes_it = params.find("dppbootstrappingdata");
-        if (dpp_bootstrapping_data_bytes_it == params.end()) {
-            err_string = "DPPBootstrappingData is missing";
-            return false;
-        }
-
-        auto dpp_bootstrapping_data_str =
-            beerocks::string_utils::bytes_string_to_string(dpp_bootstrapping_data_bytes_it->second);
-
-        LOG(DEBUG) << "UCC bootstrapping data: " << dpp_bootstrapping_data_str;
-
-        // 1. Determine if we have an alias, or if we need to auto-generate one
-        std::string alias;
-        bool auto_generate_alias = false;
-        
-        auto alias_it = params.find("alias");
-        if (alias_it != params.end() && !alias_it->second.empty()) {
-            alias = alias_it->second;
-        } else {
-            alias = "ucc-temp-alias";
-            auto_generate_alias = true;
-        }
-
-        // 2. Tunnel the URI through our secure, zero-allocation database parser
-        if (!m_database.parse_dpp_bootstrap_info(alias, dpp_bootstrapping_data_str, err_string)) {
-            LOG(ERROR) << "UCC DPP URI parsing failed: " << err_string;
-            return false;
-        }
-
-        // 3. If no alias was provided, auto-generate it using the safely parsed MAC/Key
-        if (auto_generate_alias) {
-            // NOTE: Make sure get_dpp_bootstrap_info() is defined in your db.h!
-            auto* info = m_database.get_dpp_bootstrap_info(alias);
-            if (info) {
-                std::string real_alias;
-                
-                if (info->mac != beerocks::net::network_utils::ZERO_MAC) {
-                    std::string mac_str = tlvf::mac_to_string(info->mac);
-                    // Remove colons from the MAC string
-                    mac_str.erase(std::remove(mac_str.begin(), mac_str.end(), ':'), mac_str.end());
-                    real_alias = "cpe-" + mac_str;
-                } else {
-                    real_alias = "cpe-" + info->public_key.substr(0, std::min<size_t>(12, info->public_key.size()));
-                }
-                
-                // Update the internal alias field
-                info->alias = real_alias;
-                
-                // Save under the real alias and erase the temporary one
-                m_database.add_dpp_bootstrap_info(real_alias, *info);
-                m_database.remove_dpp_bootstrap_info("ucc-temp-alias");
-                
-                LOG(INFO) << "UCC Auto-generated alias: " << real_alias;
-            }
-        }
-
-        return true;
-    }
+    sDppBootstrappingInfo info;
     
-    err_string = "command is not supported on the Controller";
-    return false;
+    if (!parse_dpp_bootstrap_info(uri, info, error)) {
+        return false;
+    }
+
+    if (enrollee_mac != beerocks::net::network_utils::ZERO_MAC) {
+        info.mac = enrollee_mac;
+    } else if (info.mac == beerocks::net::network_utils::ZERO_MAC) {
+        error = "No valid MAC address found in URI or TLV metadata";
+        return false;
+    }
+
+    info.bssid = bssid;
+    info.ruid = ruid;
+
+    std::string mac_str = tlvf::mac_to_string(info.mac);
+    mac_str.erase(std::remove(mac_str.begin(), mac_str.end(), ':'), mac_str.end());
+    
+    std::string hash_hex = hex_string_from_bytes(info.pkhash.data(), info.pkhash.size());
+    std::string hash_prefix = hash_hex.substr(0, 12);
+    
+    info.alias = "auto-" + mac_str + "-" + hash_prefix;
+
+    auto it = dpp_bootstrap_info_map.find(info.alias);
+    if (it != dpp_bootstrap_info_map.end()) {
+        LOG(DEBUG) << "Updating existing DPP bootstrap info for alias " << info.alias;
+    }
+
+    // Cache alias to avoid use-after-move undefined behavior
+    const std::string final_alias = info.alias;
+    dpp_bootstrap_info_map.insert_or_assign(final_alias, std::move(info));
+
+    LOG(INFO) << "Stored DPP URI | Alias: " << final_alias 
+              << " | Total Entries: " << dpp_bootstrap_info_map.size();
+
+    return true;
 }
 
-
-
-db::sDppBootstrappingInfo* db::get_dpp_bootstrap_info(const std::string &alias)
-{
+db::sDppBootstrappingInfo* db::get_dpp_bootstrap_info(const std::string& alias) {
     auto it = dpp_bootstrap_info_map.find(alias);
     if (it != dpp_bootstrap_info_map.end()) {
         return &it->second;
     }
     return nullptr;
+}
+
+const db::sDppBootstrappingInfo* db::get_dpp_bootstrap_info_by_pkhash(const std::array<uint8_t, 32>& pkhash) const {
+    for (const auto& entry : dpp_bootstrap_info_map) {
+        if (entry.second.pkhash == pkhash) {
+            return &entry.second;
+        }
+    }
+    return nullptr;
+}
+
+bool db::remove_dpp_bootstrap_info(const std::string& alias) {
+    auto it = dpp_bootstrap_info_map.find(alias);
+    if (it != dpp_bootstrap_info_map.end()) {
+        dpp_bootstrap_info_map.erase(it);
+        LOG(DEBUG) << "Removed DPP bootstrapping info for alias: " << alias;
+        return true;
+    }
+    return false;
+}
+
+bool Controller::handle_cmdu_1905_dpp_bootstrapping_uri_notification(
+    const sMacAddr &src_mac, ieee1905_1::CmduMessageRx &cmdu_rx)
+{
+    // 1. Extract the mandatory TLV
+    auto uri_tlv = cmdu_rx.getClass<wfa_map::tlvDppBootstrappingUriNotification>();
+    if (!uri_tlv) {
+        LOG(ERROR) << "wfa_map::tlvDppBootstrappingUriNotification missing in CMDU 0x8031";
+        return false;
+    }
+
+    // 2. Extract the URI string
+    const auto dpp_uri = uri_tlv->dpp_uri_str();
+    if (dpp_uri.empty()) {
+        LOG(WARNING) << "DPP bootstrapping URI notification from " << src_mac << " contains empty URI";
+        return false;
+    }
+
+    // 3. Establish the transport MAC (Controller Fallback Logic)
+    sMacAddr enrollee_mac = uri_tlv->backhaul_sta_address();
+    if (enrollee_mac == beerocks::net::network_utils::ZERO_MAC) {
+        enrollee_mac = uri_tlv->bssid(); 
+    }
+
+    // 4. Ingest into the unified database architecture
+    std::string error;
+    if (!m_database.add_dpp_bootstrap_info(dpp_uri, 
+                                           enrollee_mac, 
+                                           uri_tlv->bssid(), 
+                                           uri_tlv->ruid(), 
+                                           error)) {
+        LOG(WARNING) << "Failed to ingest DPP URI from " << src_mac << ": " << error;
+        return false;
+    }
+
+    return true;
 }
