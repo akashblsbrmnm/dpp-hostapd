@@ -1,5 +1,5 @@
-bool ap_wlan_hal_whm::dpp_bootstrap_gen(const std::string &bootstrap_params,
-                                        uint32_t &bootstrap_id)
+bool sta_wlan_hal_whm::dpp_bootstrap_gen(const std::string &bootstrap_params,
+                                         uint32_t &bootstrap_id)
 {
     bootstrap_id = 0;
 
@@ -8,34 +8,25 @@ bool ap_wlan_hal_whm::dpp_bootstrap_gen(const std::string &bootstrap_params,
         return false;
     }
 
-    if (m_radio_info.available_vaps.empty()) {
-        LOG(ERROR) << "No VAP available";
+    if (m_ep_path.empty()) {
+        LOG(ERROR) << "EndPoint path is empty";
         return false;
     }
 
     beerocks::wbapi::AmbiorixVariant args(AMXC_VAR_ID_HTABLE);
     beerocks::wbapi::AmbiorixVariant result;
 
-    // Matches GET_CHAR_ARG(args, "params")
     args.add_child("params", bootstrap_params);
 
-    const std::string main_vap_ifname = m_radio_info.available_vaps[0].bss;
-    const std::string dpp_path =
-        wbapi_utils::search_path_ap_by_iface(main_vap_ifname) + "DPP.";
+    const std::string dpp_path = m_ep_path + "DPP.";
 
     if (!m_ambiorix_cl.call(dpp_path, "dppBootstrapGen", args, result)) {
-        LOG(ERROR) << "dppBootstrapGen RPC failed for " << main_vap_ifname;
+        LOG(ERROR) << "dppBootstrapGen RPC failed for " << m_ep_path;
         return false;
     }
 
-    // Matches amxc_var_add_key(uint32_t, retval, "BootstrapId", bootstrapId)
     if (!result.read_child(bootstrap_id, "BootstrapId")) {
         LOG(ERROR) << "Failed reading BootstrapId from PWHM response";
-        return false;
-    }
-
-    if (bootstrap_id == 0) {
-        LOG(ERROR) << "Received invalid BootstrapId from PWHM";
         return false;
     }
 
@@ -44,8 +35,8 @@ bool ap_wlan_hal_whm::dpp_bootstrap_gen(const std::string &bootstrap_params,
     return true;
 }
 
-bool ap_wlan_hal_whm::dpp_bootstrap_get_uri(uint32_t bootstrap_id,
-                                            std::string &dpp_uri)
+bool sta_wlan_hal_whm::dpp_bootstrap_get_uri(uint32_t bootstrap_id,
+                                             std::string &dpp_uri)
 {
     dpp_uri.clear();
 
@@ -54,38 +45,29 @@ bool ap_wlan_hal_whm::dpp_bootstrap_get_uri(uint32_t bootstrap_id,
         return false;
     }
 
-    if (m_radio_info.available_vaps.empty()) {
-        LOG(ERROR) << "No VAP available";
+    if (m_ep_path.empty()) {
+        LOG(ERROR) << "EndPoint path is empty";
         return false;
     }
 
     beerocks::wbapi::AmbiorixVariant args(AMXC_VAR_ID_HTABLE);
     beerocks::wbapi::AmbiorixVariant result;
 
-    // Matches GET_UINT32_ARG(args, "bootstrapId")
     args.add_child("bootstrapId", bootstrap_id);
 
-    const std::string main_vap_ifname = m_radio_info.available_vaps[0].bss;
-    const std::string dpp_path =
-        wbapi_utils::search_path_ap_by_iface(main_vap_ifname) + "DPP.";
+    const std::string dpp_path = m_ep_path + "DPP.";
 
     if (!m_ambiorix_cl.call(dpp_path, "dppBootstrapGetUri", args, result)) {
-        LOG(ERROR) << "dppBootstrapGetUri RPC failed for " << main_vap_ifname;
+        LOG(ERROR) << "dppBootstrapGetUri RPC failed for " << m_ep_path;
         return false;
     }
 
-    // Matches amxc_var_add_key(cstring_t, retval, "URI", uri)
     if (!result.read_child(dpp_uri, "URI")) {
         LOG(ERROR) << "Failed reading URI from PWHM response";
         return false;
     }
 
-    if (dpp_uri.empty()) {
-        LOG(ERROR) << "Received empty URI from PWHM";
-        return false;
-    }
-
-    if (dpp_uri.compare(0, 4, "DPP:") != 0) {
+    if (dpp_uri.size() < 4 || dpp_uri.compare(0, 4, "DPP:") != 0) {
         LOG(ERROR) << "Received invalid DPP URI from PWHM";
         return false;
     }
