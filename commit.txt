@@ -1,3 +1,53 @@
+std::string db::calculate_dpp_bootstrapping_str(const sDppBootstrappingInfo &dpp_bootstrapping_info)
+{
+    // 1. Fail fast: A DPP URI is invalid without a public key
+    if (dpp_bootstrapping_info.public_key.empty()) {
+        LOG(ERROR) << "Cannot generate DPP URI: Missing mandatory Public Key";
+        return "";
+    }
+
+    std::string dpp_conn_string = "DPP:";
+
+    // Channel List [C:]
+    std::string opclass_channel_str;
+    for (const auto &ch : dpp_bootstrapping_info.operating_class_channel) {
+        opclass_channel_str += std::to_string(ch.first) + "/" + std::to_string(ch.second) + ",";
+    }
+    if (!opclass_channel_str.empty()) {
+        opclass_channel_str.pop_back(); // Remove trailing comma
+        dpp_conn_string += "C:" + opclass_channel_str + ";";
+    }
+
+    // MAC Address [M:]
+    if (dpp_bootstrapping_info.mac != beerocks::net::network_utils::ZERO_MAC) {
+        std::string mac_string = tlvf::mac_to_string(dpp_bootstrapping_info.mac);
+        // Corrected C++ idiom to remove specific characters
+        mac_string.erase(std::remove(mac_string.begin(), mac_string.end(), ':'), mac_string.end());
+        dpp_conn_string += "M:" + mac_string + ";";
+    }
+
+    // Information [I:]
+    if (!dpp_bootstrapping_info.info.empty()) {
+        dpp_conn_string += "I:" + dpp_bootstrapping_info.info + ";";
+    }
+
+    // Version [V:]
+    if (dpp_bootstrapping_info.version != 0) {
+        dpp_conn_string += "V:" + std::to_string(dpp_bootstrapping_info.version) + ";";
+    }
+
+    // Host [H:]
+    if (!dpp_bootstrapping_info.host.empty()) {
+        dpp_conn_string += "H:" + dpp_bootstrapping_info.host + ";";
+    }
+
+    // Public Key [K:] - Must be present and terminate the string with ';;'
+    dpp_conn_string += "K:" + dpp_bootstrapping_info.public_key + ";;";
+
+    return dpp_conn_string;
+}
+
+
 bool controller_ucc_listener::handle_dev_exec_action(
     const std::unordered_map<std::string, std::string> &params,
     std::string &err_string)
