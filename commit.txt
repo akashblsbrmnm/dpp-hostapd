@@ -1,79 +1,123 @@
-bool db::add_dpp_bootstrap_info(sDppBootstrappingInfo&& info,
-                                std::string& error)
-{
-    error.clear();
+struct sDppBootstrappingInfo {
+    std::string alias;
 
+    sMacAddr mac{};
+
+    std::string info;
+
+    uint8_t version = 0;
+
+    std::string host;
+
+    std::string public_key;
+
+    std::array<uint8_t, 32> pkhash = {};
+
+    std::multimap<uint8_t, uint8_t> operating_class_channel;
+
+    sMacAddr ruid{};
+
+    sMacAddr bssid{};
+};
+
+bool db::add_dpp_bootstrap_info(
+        sDppBootstrappingInfo&& info,
+        std::string& error)
+{
     if(info.alias.empty()) {
         error = "empty alias";
         return false;
     }
 
-    if(!std::all_of(info.alias.begin(),
-                    info.alias.end(),
-                    [](unsigned char c) {
-                        return std::isalnum(c) ||
-                               c == '-' ||
-                               c == '_' ||
-                               c == '.';
-                    })) {
-        error = "invalid alias format";
-        return false;
-    }
-
     auto it = dpp_bootstrap_info_map.find(info.alias);
+
     if(it != dpp_bootstrap_info_map.end()) {
-        LOG(WARNING)
-            << "Replacing existing DPP bootstrap info alias="
+        LOG(DEBUG)
+            << "Updating DPP bootstrap info alias="
             << info.alias;
     }
 
     const std::string alias = info.alias;
 
-    dpp_bootstrap_info_map.insert_or_assign(alias,
-                                            std::move(info));
-
-    LOG(INFO)
-        << "Stored DPP bootstrap info alias="
-        << alias
-        << " entries="
-        << dpp_bootstrap_info_map.size();
+    dpp_bootstrap_info_map.insert_or_assign(
+        alias,
+        std::move(info));
 
     return true;
 }
 
-bool Controller::handle_cmdu_1905_dpp_bootstrapping_uri_notification(
-    const sMacAddr &src_mac,
-    ieee1905_1::CmduMessageRx &cmdu_rx)
+bool db::remove_dpp_bootstrap_info(
+        const std::string& alias)
 {
-    auto uri_tlv =
-        cmdu_rx.getClass<wfa_map::tlvDppBootstrappingUriNotification>();
+    auto it =
+        dpp_bootstrap_info_map.find(alias);
 
-    if(!uri_tlv) {
-        LOG(ERROR)
-            << "tlvDppBootstrappingUriNotification missing";
+    if(it == dpp_bootstrap_info_map.end()) {
         return false;
     }
 
-    const auto dpp_uri = uri_tlv->dpp_uri_str();
+    dpp_bootstrap_info_map.erase(it);
+
+    return true;
+}
+sDppBootstrappingInfo*
+db::get_dpp_bootstrap_info(
+        const std::string& alias)
+{
+    auto it =
+        dpp_bootstrap_info_map.find(alias);
+
+    if(it == dpp_bootstrap_info_map.end()) {
+        return nullptr;
+    }
+
+    return &it->second;
+}
+const sDppBootstrappingInfo*
+db::get_dpp_bootstrap_info_by_pkhash(
+    const std::array<uint8_t, 32>& pkhash) const
+{
+    for(const auto& entry :
+        dpp_bootstrap_info_map) {
+
+        if(entry.second.pkhash == pkhash) {
+            return &entry.second;
+        }
+    }
+
+    return nullptr;
+}
+
+
+bool Controller::
+handle_cmdu_1905_dpp_bootstrapping_uri_notification(
+        const sMacAddr& src_mac,
+        ieee1905_1::CmduMessageRx& cmdu_rx)
+{
+    auto uri_tlv =
+        cmdu_rx.getClass<
+            wfa_map::
+            tlvDppBootstrappingUriNotification>();
+
+    if(!uri_tlv) {
+        return false;
+    }
+
+    auto dpp_uri =
+        uri_tlv->dpp_uri_str();
 
     if(dpp_uri.empty()) {
-        LOG(WARNING)
-            << "Received empty DPP URI";
         return false;
     }
 
     son::db::sDppBootstrappingInfo info;
+
     std::string error;
 
     if(!m_database.parse_dpp_bootstrap_info(
             dpp_uri,
             info,
             error)) {
-
-        LOG(WARNING)
-            << "Failed parsing DPP URI: "
-            << error;
-
         return false;
     }
 
@@ -82,7 +126,8 @@ bool Controller::handle_cmdu_1905_dpp_bootstrapping_uri_notification(
 
     if(enrollee_mac ==
        beerocks::net::network_utils::ZERO_MAC) {
-        enrollee_mac = uri_tlv->bssid();
+        enrollee_mac =
+            uri_tlv->bssid();
     }
 
     if(enrollee_mac !=
@@ -92,27 +137,30 @@ bool Controller::handle_cmdu_1905_dpp_bootstrapping_uri_notification(
 
     if(info.mac ==
        beerocks::net::network_utils::ZERO_MAC) {
-
         LOG(WARNING)
-            << "Unable to determine enrollee MAC from transport or URI";
-
+            << "Unable to determine enrollee MAC";
         return false;
     }
 
-    info.ruid = uri_tlv->ruid();
-    info.bssid = uri_tlv->bssid();
+    info.ruid =
+        uri_tlv->ruid();
+
+    info.bssid =
+        uri_tlv->bssid();
 
     std::string mac_str =
         tlvf::mac_to_string(info.mac);
 
     mac_str.erase(
-        std::remove(mac_str.begin(),
-                    mac_str.end(),
-                    ':'),
+        std::remove(
+            mac_str.begin(),
+            mac_str.end(),
+            ':'),
         mac_str.end());
 
     std::string hash_hex =
-        beerocks::string_utils::bytes_to_hex_string(
+        beerocks::string_utils::
+        bytes_to_hex_string(
             info.pkhash.data(),
             info.pkhash.size());
 
@@ -122,77 +170,23 @@ bool Controller::handle_cmdu_1905_dpp_bootstrapping_uri_notification(
         "-" +
         hash_hex.substr(0, 12);
 
-    if(!m_database.add_dpp_bootstrap_info(
-            std::move(info),
-            error)) {
-
-        LOG(WARNING)
-            << "Failed storing DPP bootstrap info: "
-            << error;
-
-        return false;
-    }
-
-    return true;
+    return m_database.add_dpp_bootstrap_info(
+        std::move(info),
+        error);
 }
-
-static void event_provisioned_dpp_changed(
-    const char *const sig_name,
-    const amxc_var_t *const data,
-    void *const priv)
+static void event_provisioned_dpp_changed(...)
 {
-    amxc_var_t* params = GET_ARG(data, "parameters");
-
-    if(params) {
-        if(GET_ARG(params, "DPPURI") == nullptr &&
-           GET_ARG(params, "Alias") == nullptr) {
-            return;
-        }
-    }
-
-    amxd_object_t *dpp_obj =
-        amxd_dm_signal_get_object(
-            beerocks::nbapi::Amxrt::getDatamodel(),
-            data);
-
-    if(!dpp_obj) {
-        return;
-    }
-
-    const char *alias =
-        amxd_object_get_cstring_t(
-            dpp_obj,
-            "Alias",
-            nullptr);
-
-    if(!alias || alias[0] == '\0') {
-        return;
-    }
-
-    const char *dpp_uri =
-        amxd_object_get_cstring_t(
-            dpp_obj,
-            "DPPURI",
-            nullptr);
-
-    if(!dpp_uri || dpp_uri[0] == '\0') {
-        return;
-    }
+    ...
 
     son::db::sDppBootstrappingInfo info;
-    std::string error;
+
+    std::string err;
 
     if(!g_database->parse_dpp_bootstrap_info(
             dpp_uri,
             info,
-            error)) {
-
-        LOG(ERROR)
-            << "Failed parsing DPPURI alias="
-            << alias
-            << " error="
-            << error;
-
+            err)) {
+        ...
         return;
     }
 
@@ -200,59 +194,8 @@ static void event_provisioned_dpp_changed(
 
     if(!g_database->add_dpp_bootstrap_info(
             std::move(info),
-            error)) {
-
-        LOG(ERROR)
-            << "Failed storing DPPURI alias="
-            << alias
-            << " error="
-            << error;
+            err)) {
+        ...
     }
 }
-constexpr size_t MAX_DPP_HOST_LEN = 255;
 
-struct sDppBootstrappingInfo {
-    std::string alias;
-
-    sMacAddr mac{};
-    std::string info;
-    uint8_t version = 0;
-    std::string host;
-    std::string public_key;
-
-    std::array<uint8_t, 32> pkhash = {};
-
-    std::multimap<uint8_t, uint8_t> operating_class_channel;
-
-    sMacAddr ruid{};
-    sMacAddr bssid{};
-};
-
-bool parse_dpp_bootstrap_info(const std::string& dpp_uri,
-                              sDppBootstrappingInfo& info,
-                              std::string& error);
-
-bool add_dpp_bootstrap_info(sDppBootstrappingInfo&& info,
-                            std::string& error);
-
-sDppBootstrappingInfo* get_dpp_bootstrap_info(const std::string& alias);
-
-const sDppBootstrappingInfo*
-get_dpp_bootstrap_info_by_pkhash(
-    const std::array<uint8_t, 32>& pkhash) const;
-
-bool remove_dpp_bootstrap_info(const std::string& alias);
-static void event_provisioned_dpp_removed(
-    const char *const sig_name,
-    const amxc_var_t *const data,
-    void *const priv)
-{
-    const char *alias =
-        GETP_CHAR(data, "parameters.Alias");
-
-    if(!alias || alias[0] == '\0') {
-        return;
-    }
-
-    g_database->remove_dpp_bootstrap_info(alias);
-}
