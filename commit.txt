@@ -1,195 +1,96 @@
-std::string db::calculate_dpp_bootstrapping_str(const sDppBootstrappingInfo &dpp_bootstrapping_info)
+bool ap_wlan_hal_whm::dpp_bootstrap_gen(const std::string &bootstrap_params,
+                                        uint32_t &bootstrap_id)
 {
-    // 1. Fail fast: A DPP URI is invalid without a public key
-    if (dpp_bootstrapping_info.public_key.empty()) {
-        LOG(ERROR) << "Cannot generate DPP URI: Missing mandatory Public Key";
-        return "";
+    bootstrap_id = 0;
+
+    if (bootstrap_params.empty()) {
+        LOG(ERROR) << "Empty DPP bootstrap parameters";
+        return false;
     }
 
-    std::string dpp_conn_string = "DPP:";
-
-    // Channel List [C:]
-    std::string opclass_channel_str;
-    for (const auto &ch : dpp_bootstrapping_info.operating_class_channel) {
-        opclass_channel_str += std::to_string(ch.first) + "/" + std::to_string(ch.second) + ",";
-    }
-    if (!opclass_channel_str.empty()) {
-        opclass_channel_str.pop_back(); // Remove trailing comma
-        dpp_conn_string += "C:" + opclass_channel_str + ";";
+    if (m_radio_info.available_vaps.empty()) {
+        LOG(ERROR) << "No VAP available";
+        return false;
     }
 
-    // MAC Address [M:]
-    if (dpp_bootstrapping_info.mac != beerocks::net::network_utils::ZERO_MAC) {
-        std::string mac_string = tlvf::mac_to_string(dpp_bootstrapping_info.mac);
-        // Corrected C++ idiom to remove specific characters
-        mac_string.erase(std::remove(mac_string.begin(), mac_string.end(), ':'), mac_string.end());
-        dpp_conn_string += "M:" + mac_string + ";";
+    beerocks::wbapi::AmbiorixVariant args(AMXC_VAR_ID_HTABLE);
+    beerocks::wbapi::AmbiorixVariant result;
+
+    // Matches GET_CHAR_ARG(args, "params")
+    args.add_child("params", bootstrap_params);
+
+    const std::string main_vap_ifname = m_radio_info.available_vaps[0].bss;
+    const std::string dpp_path =
+        wbapi_utils::search_path_ap_by_iface(main_vap_ifname) + "DPP.";
+
+    if (!m_ambiorix_cl.call(dpp_path, "dppBootstrapGen", args, result)) {
+        LOG(ERROR) << "dppBootstrapGen RPC failed for " << main_vap_ifname;
+        return false;
     }
 
-    // Information [I:]
-    if (!dpp_bootstrapping_info.info.empty()) {
-        dpp_conn_string += "I:" + dpp_bootstrapping_info.info + ";";
+    // Matches amxc_var_add_key(uint32_t, retval, "BootstrapId", bootstrapId)
+    if (!result.read_child(bootstrap_id, "BootstrapId")) {
+        LOG(ERROR) << "Failed reading BootstrapId from PWHM response";
+        return false;
     }
 
-    // Version [V:]
-    if (dpp_bootstrapping_info.version != 0) {
-        dpp_conn_string += "V:" + std::to_string(dpp_bootstrapping_info.version) + ";";
+    if (bootstrap_id == 0) {
+        LOG(ERROR) << "Received invalid BootstrapId from PWHM";
+        return false;
     }
 
-    // Host [H:]
-    if (!dpp_bootstrapping_info.host.empty()) {
-        dpp_conn_string += "H:" + dpp_bootstrapping_info.host + ";";
-    }
+    LOG(DEBUG) << "Generated DPP bootstrap id=" << bootstrap_id;
 
-    // Public Key [K:] - Must be present and terminate the string with ';;'
-    dpp_conn_string += "K:" + dpp_bootstrapping_info.public_key + ";;";
-
-    return dpp_conn_string;
+    return true;
 }
 
-
-bool controller_ucc_listener::handle_dev_exec_action(
-    const std::unordered_map<std::string, std::string> &params,
-    std::string &err_string)
+bool ap_wlan_hal_whm::dpp_bootstrap_get_uri(uint32_t bootstrap_id,
+                                            std::string &dpp_uri)
 {
-    auto action_type_it = params.find("dppactiontype");
+    dpp_uri.clear();
 
-    if (action_type_it != params.end()) {
-
-        auto &action_type = action_type_it->second;
-
-        if (action_type != "SetPeerBootstrap") {
-            err_string =
-                "DPPActionType is not 'SetPeerBootstrap', value is '" +
-                action_type + "'";
-            return false;
-        }
-
-        auto dpp_bootstrapping_data_bytes_it =
-            params.find("dppbootstrappingdata");
-
-        if (dpp_bootstrapping_data_bytes_it == params.end()) {
-            err_string = "DPPBootstrappingData is missing";
-            return false;
-        }
-
-        auto &dpp_bootstrapping_data_bytes =
-            dpp_bootstrapping_data_bytes_it->second;
-
-        auto dpp_bootstrapping_data_str =
-            beerocks::string_utils::bytes_string_to_string(
-                dpp_bootstrapping_data_bytes);
-
-        LOG(DEBUG)
-            << "bootstrapping data: "
-            << dpp_bootstrapping_data_str;
-
-        son::db::sDppBootstrappingInfo enrollee_bootstrapping_info;
-
-        if (!m_database.parse_dpp_bootstrap_info(
-                dpp_bootstrapping_data_str,
-                enrollee_bootstrapping_info,
-                err_string)) {
-
-            err_string =
-                "Failed to parse DPP bootstrapping data: " +
-                err_string;
-
-            return false;
-        }
-
-        //
-        // Alias handling
-        //
-
-        std::string alias;
-
-        auto alias_it = params.find("alias");
-
-        if ((alias_it != params.end()) &&
-            !alias_it->second.empty()) {
-
-            alias = alias_it->second;
-
-        } else {
-
-            //
-            // Auto-generate alias
-            //
-
-            if (enrollee_bootstrapping_info.mac !=
-                beerocks::net::network_utils::ZERO_MAC) {
-
-                std::string mac_str =
-                    tlvf::mac_to_string(
-                        enrollee_bootstrapping_info.mac);
-
-                mac_str.erase(
-                    std::remove(
-                        mac_str.begin(),
-                        mac_str.end(),
-                        ':'),
-                    mac_str.end());
-
-                alias = "cpe-" + mac_str;
-
-            } else {
-
-                //
-                // URI omitted M:
-                // use PKHASH-derived alias
-                //
-
-                std::string hash_hex =
-                    beerocks::string_utils::bytes_to_hex_string(
-                        enrollee_bootstrapping_info.pkhash.data(),
-                        enrollee_bootstrapping_info.pkhash.size());
-
-                alias =
-                    "cpe-" +
-                    hash_hex.substr(
-                        0,
-                        std::min<size_t>(12, hash_hex.size()));
-            }
-        }
-
-        enrollee_bootstrapping_info.alias = alias;
-
-        LOG(DEBUG)
-            << "alias=" << alias;
-
-        LOG(DEBUG)
-            << "mac="
-            << tlvf::mac_to_string(
-                   enrollee_bootstrapping_info.mac);
-
-        LOG(DEBUG)
-            << "info="
-            << enrollee_bootstrapping_info.info;
-
-        LOG(DEBUG)
-            << "version="
-            << static_cast<int>(
-                   enrollee_bootstrapping_info.version);
-
-        LOG(DEBUG)
-            << "host="
-            << enrollee_bootstrapping_info.host;
-
-        LOG(DEBUG)
-            << "public_key="
-            << enrollee_bootstrapping_info.public_key;
-
-        if (!m_database.add_dpp_bootstrap_info(
-                std::move(enrollee_bootstrapping_info),
-                err_string)) {
-
-            return false;
-        }
-
-        return true;
+    if (bootstrap_id == 0) {
+        LOG(ERROR) << "Invalid bootstrap id";
+        return false;
     }
 
-    err_string = "command is not supported on the Controller";
-    return false;
+    if (m_radio_info.available_vaps.empty()) {
+        LOG(ERROR) << "No VAP available";
+        return false;
+    }
+
+    beerocks::wbapi::AmbiorixVariant args(AMXC_VAR_ID_HTABLE);
+    beerocks::wbapi::AmbiorixVariant result;
+
+    // Matches GET_UINT32_ARG(args, "bootstrapId")
+    args.add_child("bootstrapId", bootstrap_id);
+
+    const std::string main_vap_ifname = m_radio_info.available_vaps[0].bss;
+    const std::string dpp_path =
+        wbapi_utils::search_path_ap_by_iface(main_vap_ifname) + "DPP.";
+
+    if (!m_ambiorix_cl.call(dpp_path, "dppBootstrapGetUri", args, result)) {
+        LOG(ERROR) << "dppBootstrapGetUri RPC failed for " << main_vap_ifname;
+        return false;
+    }
+
+    // Matches amxc_var_add_key(cstring_t, retval, "URI", uri)
+    if (!result.read_child(dpp_uri, "URI")) {
+        LOG(ERROR) << "Failed reading URI from PWHM response";
+        return false;
+    }
+
+    if (dpp_uri.empty()) {
+        LOG(ERROR) << "Received empty URI from PWHM";
+        return false;
+    }
+
+    if (dpp_uri.compare(0, 4, "DPP:") != 0) {
+        LOG(ERROR) << "Received invalid DPP URI from PWHM";
+        return false;
+    }
+
+    LOG(DEBUG) << "Retrieved DPP URI length=" << dpp_uri.length();
+
+    return true;
 }
