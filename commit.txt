@@ -1,22 +1,78 @@
-git diff --stat Od15a153a..4a56f8609
-git diff Od15a153a..4a56f8609
+void db::print_dpp_bootstrap_info() const
+{
+    LOG(INFO) << "JUST FOR DEBUGGING";
+    
+    if (dpp_bootstrap_info_map.empty()) {
+        LOG(INFO) << "DPP Bootstrap Info: [empty]";
+        return;
+    }
 
-git merge-base --is-ancestor Od15a153a 4a56f8609 && echo YES
+    LOG(INFO) << "=== DPP Bootstrap Info [" << dpp_bootstrap_info_map.size() << " entries] ==="; 
+    
+    uint32_t idx = 1; 
+    for (const auto &entry : dpp_bootstrap_info_map) { 
+        const sDppBootstrappingInfo &info = entry.second; 
+        
+        std::string channels_str; 
+        for (const auto &ch : info.operating_class_channel) { 
+            if (!channels_str.empty()) { 
+                channels_str += ", "; 
+            } 
+            channels_str += std::to_string(ch.first) + "/" + std::to_string(ch.second); 
+        } 
+        
+        LOG(INFO) << "  [" << idx << "] Alias    : " << entry.first; 
+        LOG(INFO) << "      MAC      : " << info.mac; 
+        LOG(INFO) << "      Version  : " << static_cast<int>(info.version); 
+        LOG(INFO) << "      Channels : " << (channels_str.empty() ? "<not set>" : channels_str); 
+        LOG(INFO) << "      Info     : " << (info.info.empty() ? "<not set>" : info.info); 
+        LOG(INFO) << "      Host     : " << (info.host.empty() ? "<not set>" : info.host); 
+        LOG(INFO) << "      PubKey   : " << info.public_key; 
+        
+        // Convert pkhash vector to hex string for easy visual debugging against Chirp CMDUs
+        std::string pkhash_hex = beerocks::string_utils::bytes_to_hex_string(info.pkhash.data(), info.pkhash.size());
+        LOG(INFO) << "      PKHash   : " << pkhash_hex;
+        
+        idx++; 
+    } 
+    
+    LOG(INFO) << "=== End DPP Bootstrap Info ==="; 
+}
+LOG(INFO) << "      MAC      : " << info.mac;
+LOG(INFO) << "      RUID     : " << info.ruid;
+LOG(INFO) << "      BSSID    : " << info.bssid;
+LOG(INFO) << "      Version  : " << static_cast<int>(info.version);
 
-git show 4a56f8609
+dpp_bootstrap_info_map.insert_or_assign(
+    alias,
+    std::move(info));
 
-git diff 4a56f8609^ 4a56f8609
+print_dpp_bootstrap_info();
 
-git branch backup-before-surgery
+return true;
 
-git checkout -b recovery a204cc727
+bool db::add_dpp_bootstrap_info(sDppBootstrappingInfo&& info,
+                                std::string& error)
+{
+    // ... [Previous validation code remains exactly the same] ...
 
-git cherry-pick Od15a153a
+    // Safely cache the string to guarantee evaluation order independence
+    std::string safe_alias = info.alias;
 
-git restore --staged <file>
-git restore <file>
+    auto it = dpp_bootstrap_info_map.find(safe_alias);
+    if(it != dpp_bootstrap_info_map.end()) {
+        LOG(WARNING) << "Replacing existing DPP bootstrap info alias=" << safe_alias;
+        it->second = std::move(info);
+    } else {
+        dpp_bootstrap_info_map.emplace(safe_alias, std::move(info));
+    }
 
-git commit -m "DPPURI DM: Add support for DPP bootstrapping info data model"
+    LOG(INFO) << "Stored DPP bootstrap info alias=" << safe_alias 
+              << " entries=" << dpp_bootstrap_info_map.size();
 
-git diff --name-status Od15a153a..4a56f8609
+    // Trigger the debug print here
+    print_dpp_bootstrap_info();
+
+    return true;
+}
 
