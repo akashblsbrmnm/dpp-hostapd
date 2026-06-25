@@ -1,78 +1,70 @@
-void db::print_dpp_bootstrap_info() const
-{
-    LOG(INFO) << "JUST FOR DEBUGGING";
-    
-    if (dpp_bootstrap_info_map.empty()) {
-        LOG(INFO) << "DPP Bootstrap Info: [empty]";
-        return;
-    }
+/* templates.odl.in */
 
-    LOG(INFO) << "=== DPP Bootstrap Info [" << dpp_bootstrap_info_map.size() << " entries] ==="; 
-    
-    uint32_t idx = 1; 
-    for (const auto &entry : dpp_bootstrap_info_map) { 
-        const sDppBootstrappingInfo &info = entry.second; 
-        
-        std::string channels_str; 
-        for (const auto &ch : info.operating_class_channel) { 
-            if (!channels_str.empty()) { 
-                channels_str += ", "; 
-            } 
-            channels_str += std::to_string(ch.first) + "/" + std::to_string(ch.second); 
-        } 
-        
-        LOG(INFO) << "  [" << idx << "] Alias    : " << entry.first; 
-        LOG(INFO) << "      MAC      : " << info.mac; 
-        LOG(INFO) << "      Version  : " << static_cast<int>(info.version); 
-        LOG(INFO) << "      Channels : " << (channels_str.empty() ? "<not set>" : channels_str); 
-        LOG(INFO) << "      Info     : " << (info.info.empty() ? "<not set>" : info.info); 
-        LOG(INFO) << "      Host     : " << (info.host.empty() ? "<not set>" : info.host); 
-        LOG(INFO) << "      PubKey   : " << info.public_key; 
-        
-        // Convert pkhash vector to hex string for easy visual debugging against Chirp CMDUs
-        std::string pkhash_hex = beerocks::string_utils::bytes_to_hex_string(info.pkhash.data(), info.pkhash.size());
-        LOG(INFO) << "      PKHash   : " << pkhash_hex;
-        
-        idx++; 
-    } 
-    
-    LOG(INFO) << "=== End DPP Bootstrap Info ==="; 
-}
-LOG(INFO) << "      MAC      : " << info.mac;
-LOG(INFO) << "      RUID     : " << info.ruid;
-LOG(INFO) << "      BSSID    : " << info.bssid;
-LOG(INFO) << "      Version  : " << static_cast<int>(info.version);
-
-dpp_bootstrap_info_map.insert_or_assign(
-    alias,
-    std::move(info));
-
-print_dpp_bootstrap_info();
-
-return true;
-
-bool db::add_dpp_bootstrap_info(sDppBootstrappingInfo&& info,
-                                std::string& error)
-{
-    // ... [Previous validation code remains exactly the same] ...
-
-    // Safely cache the string to guarantee evaluation order independence
-    std::string safe_alias = info.alias;
-
-    auto it = dpp_bootstrap_info_map.find(safe_alias);
-    if(it != dpp_bootstrap_info_map.end()) {
-        LOG(WARNING) << "Replacing existing DPP bootstrap info alias=" << safe_alias;
-        it->second = std::move(info);
-    } else {
-        dpp_bootstrap_info_map.emplace(safe_alias, std::move(info));
-    }
-
-    LOG(INFO) << "Stored DPP bootstrap info alias=" << safe_alias 
-              << " entries=" << dpp_bootstrap_info_map.size();
-
-    // Trigger the debug print here
-    print_dpp_bootstrap_info();
-
-    return true;
+%config {
+    // Suppress duplication errors when merging into existing trees
+    define-behavior = {
+        existing-object = "update"
+    };
 }
 
+%define {
+    // Safely hook into the macro-generated path
+    select "Device.WiFi" {
+
+        %persistent object Templates {
+
+            %persistent object Network {
+                %persistent bool Enable = false;
+                %persistent csv_string TopologyFlag = "";
+                %persistent csv_string IEEE1905ALID = "";
+                %persistent string PrimarySSCTemplateReference = "";
+                %read-only string PrimarySSCTemplateID = "";
+            }
+
+            %persistent object BSSTemplate[] {
+                counted with BSSTemplateNumberOfEntries;
+
+                %key %persistent string Alias = "";
+                %key %persistent string BSSTemplateID = "";
+                %persistent uint32 Priority = 0 {
+                    on action validate call check_range [0, 255];
+                }
+                %persistent string RadioTemplateReference = "";
+                %persistent string SSCTemplateReference = "";
+                %persistent string APMLDTemplateReference = "";
+                %persistent string SecurityGroupReference = "";
+                %read-only string LinkedRadioTemplateID = "";
+                %read-only string LinkedSSCTemplateID = "";
+                %read-only string LinkedAPMLDTemplateID = "";
+                %read-only string LinkedSecurityGroupID = "";
+                %persistent csv_string TopologyFlag = "";
+                %persistent csv_string IEEE1905ALID = "";
+                %persistent uint32 MaxWLANHopLimitFlag = 0 {
+                    on action validate call check_range [0, 255];
+                }
+                %persistent string SecureEquipmentFlag = "null" {
+                    default "null";
+                    on action validate call check_enum [
+                        "true", "false", "null"
+                    ];
+                }
+                %persistent bool Enable = true;
+                %persistent string SSID = "";
+                %persistent string KeyPassphrase = "";
+                %persistent bool AdvertisementEnable = true;
+                %persistent string X_PRPLWARE-COM_VapType {
+                    default "other";
+                    on action validate call check_enum [
+                        "home", "guest", "video", "backhaul",
+                        "hotspot", "staff", "isolated", "other"
+                    ];
+                }
+            }
+
+            // ... (Include your other %persistent objects like RadioTemplate[], 
+            // APMLDTemplate[], SSCTemplate[], SecurityGroup[], SecurityTemplate[] 
+            // making sure every object declaration has the %persistent flag) ...
+
+        } /* end Templates */
+    } /* end select Device.WiFi */
+}
