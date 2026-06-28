@@ -1,70 +1,300 @@
-/* templates.odl.in */
+%populate {
 
-%config {
-    // Suppress duplication errors when merging into existing trees
-    define-behavior = {
-        existing-object = "update"
-    };
-}
+    object '@TEMPLATES_ROOT_DM@' {
 
-%define {
-    // Safely hook into the macro-generated path
-    select "Device.WiFi" {
+        object 'Network' {
+            parameter 'Enable' = false;
+            parameter 'TopologyFlag' = "Root,Repeater";
+            parameter 'IEEE1905ALID' = "";
+            parameter 'PrimarySSCTemplateReference' =
+                "Device.WiFi.Templates.SSCTemplate.2";
+        }
 
-        %persistent object Templates {
+        /* --------------------------------------- */
+        /* Radio 1 : 2.4GHz                        */
+        /* --------------------------------------- */
 
-            %persistent object Network {
-                %persistent bool Enable = false;
-                %persistent csv_string TopologyFlag = "";
-                %persistent csv_string IEEE1905ALID = "";
-                %persistent string PrimarySSCTemplateReference = "";
-                %read-only string PrimarySSCTemplateID = "";
+        object RadioTemplate {
+
+            instance add ("radio-template-2g") {
+
+                parameter 'RadioTemplateID' =
+                    "radio-template-001";
+
+                parameter 'Enable' = true;
+
+                parameter 'Priority' = 200;
+
+                parameter 'BandFlag' = "2.4";
+
+                parameter 'TransmitPowerLimit' = 20;
+
+                parameter 'SupportedGenerationFlag' = "";
+
+                parameter 'OperatingGeneration' = "";
+
+                parameter 'OpClassFlag' = "";
             }
 
-            %persistent object BSSTemplate[] {
-                counted with BSSTemplateNumberOfEntries;
+            /* ----------------------------------- */
+            /* Radio 2 : 5GHz                      */
+            /* ----------------------------------- */
 
-                %key %persistent string Alias = "";
-                %key %persistent string BSSTemplateID = "";
-                %persistent uint32 Priority = 0 {
-                    on action validate call check_range [0, 255];
-                }
-                %persistent string RadioTemplateReference = "";
-                %persistent string SSCTemplateReference = "";
-                %persistent string APMLDTemplateReference = "";
-                %persistent string SecurityGroupReference = "";
-                %read-only string LinkedRadioTemplateID = "";
-                %read-only string LinkedSSCTemplateID = "";
-                %read-only string LinkedAPMLDTemplateID = "";
-                %read-only string LinkedSecurityGroupID = "";
-                %persistent csv_string TopologyFlag = "";
-                %persistent csv_string IEEE1905ALID = "";
-                %persistent uint32 MaxWLANHopLimitFlag = 0 {
-                    on action validate call check_range [0, 255];
-                }
-                %persistent string SecureEquipmentFlag = "null" {
-                    default "null";
-                    on action validate call check_enum [
-                        "true", "false", "null"
-                    ];
-                }
-                %persistent bool Enable = true;
-                %persistent string SSID = "";
-                %persistent string KeyPassphrase = "";
-                %persistent bool AdvertisementEnable = true;
-                %persistent string X_PRPLWARE-COM_VapType {
-                    default "other";
-                    on action validate call check_enum [
-                        "home", "guest", "video", "backhaul",
-                        "hotspot", "staff", "isolated", "other"
-                    ];
+            instance add ("radio-template-5g") {
+
+                parameter 'RadioTemplateID' =
+                    "radio-template-002";
+
+                parameter 'Enable' = true;
+
+                parameter 'Priority' = 200;
+
+                parameter 'BandFlag' = "5";
+
+                parameter 'TransmitPowerLimit' = 20;
+
+                parameter 'SupportedGenerationFlag' = "";
+
+                parameter 'OperatingGeneration' = "";
+
+                parameter 'OpClassFlag' = "";
+            }
+        }
+
+        /* --------------------------------------- */
+        /* SSC                                     */
+        /* --------------------------------------- */
+
+        object SSCTemplate {
+
+            instance add ("ssc-template-bh") {
+
+                parameter 'SSCTemplateID' =
+                    "ssc-template-001";
+
+                parameter 'SSCEnable' = true;
+
+                parameter 'VID' = 0;
+
+                parameter 'HaulType' =
+                    "Backhaul";
+            }
+
+            instance add ("ssc-template-fh") {
+
+                parameter 'SSCTemplateID' =
+                    "ssc-template-002";
+
+                parameter 'SSCEnable' = true;
+
+                parameter 'VID' = 0;
+
+                parameter 'HaulType' =
+                    "Fronthaul";
+            }
+        }
+
+        /* --------------------------------------- */
+        /* Security Templates                      */
+        /* --------------------------------------- */
+
+        object SecurityTemplate {
+
+            /* SAE */
+
+            instance add ("sec-template-sae") {
+
+                parameter 'SecurityTemplateID' =
+                    "sec-template-001";
+
+                parameter 'Enable' = true;
+
+                parameter 'Priority' = 220;
+
+                parameter 'RSNOSupportFlag' =
+                    "null";
+
+                object RSNE {
+
+                    parameter 'GroupDataCipherSuite' =
+                        "ccmp";
+
+                    parameter 'PairwiseCipherSuite' =
+                        "ccmp";
+
+                    parameter 'AKMSuite' =
+                        "sae";
+
+                    parameter 'MFP' =
+                        "Required";
                 }
             }
 
-            // ... (Include your other %persistent objects like RadioTemplate[], 
-            // APMLDTemplate[], SSCTemplate[], SecurityGroup[], SecurityTemplate[] 
-            // making sure every object declaration has the %persistent flag) ...
+            /* Transition */
 
-        } /* end Templates */
-    } /* end select Device.WiFi */
+            instance add ("sec-template-transition") {
+
+                parameter 'SecurityTemplateID' =
+                    "sec-template-002";
+
+                parameter 'Enable' = true;
+
+                parameter 'Priority' = 210;
+
+                parameter 'RSNOSupportFlag' =
+                    "null";
+
+                object RSNE {
+
+                    parameter 'GroupDataCipherSuite' =
+                        "ccmp";
+
+                    parameter 'PairwiseCipherSuite' =
+                        "ccmp";
+
+                    parameter 'AKMSuite' =
+                        "psk,sae";
+
+                    parameter 'MFP' =
+                        "Required";
+                }
+            }
+        }
+
+        /* --------------------------------------- */
+        /* Security Groups                         */
+        /* --------------------------------------- */
+
+        object SecurityGroup {
+
+            instance add ("security-group-bh") {
+
+                parameter 'SecurityGroupID' =
+                    "sg-template-001";
+
+                parameter 'SecurityTemplateReferences' =
+                    "Device.WiFi.Templates.SecurityTemplate.1";
+            }
+
+            instance add ("security-group-fh") {
+
+                parameter 'SecurityGroupID' =
+                    "sg-template-002";
+
+                parameter 'SecurityTemplateReferences' =
+                    "Device.WiFi.Templates.SecurityTemplate.2";
+            }
+        }
+
+        /* --------------------------------------- */
+        /* BSS Templates                           */
+        /* --------------------------------------- */
+
+        object BSSTemplate {
+
+            /* Backhaul */
+
+            instance add ("bss-template-bh") {
+
+                parameter 'BSSTemplateID' =
+                    "bss-template-001";
+
+                parameter 'Enable' = false;
+
+                parameter 'Priority' = 240;
+
+                parameter 'SSID' =
+                    "TATA-BH";
+
+                parameter 'KeyPassphrase' =
+                    "bh5gsae123";
+
+                parameter 'AdvertisementEnable' =
+                    true;
+
+                parameter 'TopologyFlag' =
+                    "Root,Repeater";
+
+                parameter 'X_PRPLWARE-COM_VapType' =
+                    "backhaul";
+
+                parameter 'RadioTemplateReference' =
+                    "Device.WiFi.Templates.RadioTemplate.2";
+
+                parameter 'SSCTemplateReference' =
+                    "Device.WiFi.Templates.SSCTemplate.1";
+
+                parameter 'SecurityGroupReference' =
+                    "Device.WiFi.Templates.SecurityGroup.1";
+            }
+
+            /* Fronthaul */
+
+            instance add ("bss-template-fh") {
+
+                parameter 'BSSTemplateID' =
+                    "bss-template-002";
+
+                parameter 'Enable' = false;
+
+                parameter 'Priority' = 230;
+
+                parameter 'SSID' =
+                    "TATA";
+
+                parameter 'KeyPassphrase' =
+                    "tatawifi123";
+
+                parameter 'AdvertisementEnable' =
+                    true;
+
+                parameter 'TopologyFlag' =
+                    "Root,Repeater";
+
+                parameter 'X_PRPLWARE-COM_VapType' =
+                    "home";
+
+                parameter 'RadioTemplateReference' =
+                    "Device.WiFi.Templates.RadioTemplate.2";
+
+                parameter 'SSCTemplateReference' =
+                    "Device.WiFi.Templates.SSCTemplate.2";
+
+                parameter 'SecurityGroupReference' =
+                    "Device.WiFi.Templates.SecurityGroup.2";
+            }
+        }
+    }
 }
+
+Device.WiFi.Templates
+
+Network
+
+RadioTemplate
+ ├── radio-template-2g
+ └── radio-template-5g
+
+SSCTemplate
+ ├── ssc-template-bh
+ └── ssc-template-fh
+
+SecurityTemplate
+ ├── sec-template-sae
+ └── sec-template-transition
+
+SecurityGroup
+ ├── sg-template-001
+ └── sg-template-002
+
+BSSTemplate
+ ├── bss-template-bh
+ └── bss-template-fh
+
+
+ba-cli 'Device.WiFi.Templates.BSSTemplate.1.Enable=true'
+ba-cli 'Device.WiFi.Templates.BSSTemplate.2.Enable=true'
+
+sleep 5
+
+ba-cli 'Device.WiFi.Templates.Network.Enable=true'
