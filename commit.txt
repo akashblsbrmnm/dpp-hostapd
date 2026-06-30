@@ -1,157 +1,450 @@
-#include <fstream>
-#include <vector>
-#include <cstdio>
-#include <unistd.h>
-#include "bcl/beerocks_os_utils.h"
+namespace {
 
-// Guard to prevent boot-looping the event handler
 bool g_templates_dm_initialized = false;
 
-// Helper to handle whitespace in INI sections
-static inline void trim_whitespace(std::string &s) {
-    s.erase(s.find_last_not_of(" \t\r\n") + 1);
-    s.erase(0, s.find_first_not_of(" \t\r\n"));
 }
 
-static std::string get_effective_controller_config() {
-    std::string fallback = mapf::utils::get_install_path() + "config/beerocks_controller.conf";
+bool is_templates_dm_initialized()
+{
+    return g_templates_dm_initialized;
+}
+
+void set_templates_dm_initialized(bool initialized)
+{
+    g_templates_dm_initialized = initialized;
+}
+enum class ConfigUpdateResult {
+    ERROR,
+    ALREADY_SET,
+    UPDATED
+};
+static inline void trim_whitespace(std::string &str)
+{
+    auto first = str.find_first_not_of(" \t\r\n");
+
+    if (first == std::string::npos) {
+        str.clear();
+        return;
+    }
+
+    auto last = str.find_last_not_of(" \t\r\n");
+
+    str = str.substr(first, last - first + 1);
+}
+
+static std::string get_effective_controller_config()
+{
+    constexpr char TMP_CONF[] = "/tmp/beerocks_controller.conf";
 
 #ifdef BEEROCKS_RDKB
-    std::string primary = "/nvram/beerocks_controller.conf";
+    constexpr char PRIMARY_CONF[] = "/nvram/beerocks_controller.conf";
 #else
-    std::string primary = "./beerocks_controller.conf";
+    constexpr char PRIMARY_CONF[] = "./beerocks_controller.conf";
 #endif
 
-    constexpr char TMP_CONF[] = "/tmp/beerocks_controller.conf";
+    auto fallback =
+        mapf::utils::get_install_path() +
+        "config/beerocks_controller.conf";
+
     if (access(TMP_CONF, F_OK) == 0) {
+        LOG(INFO)
+            << "Templates: using controller config override "
+            << TMP_CONF;
+
         return TMP_CONF;
     }
-    if (access(primary.c_str(), F_OK) == 0) {
-        return primary;
+
+    if (access(PRIMARY_CONF, F_OK) == 0) {
+
+        LOG(INFO)
+            << "Templates: using controller config "
+            << PRIMARY_CONF;
+
+        return PRIMARY_CONF;
     }
+
+    LOG(INFO)
+        << "Templates: using fallback controller config "
+        << fallback;
+
     return fallback;
 }
 
-static bool update_master_config_file(bool enable_templates) {
-    std::string target_file = get_effective_controller_config();
-    std::ifstream file_in(target_file);
-    
-    if (!file_in.is_open()) {
-        LOG(ERROR) << "Failed to open config file: " << target_file;
-        return false;
+static ConfigUpdateResult
+update_master_config_file(bool enable_templates)
+{
+    auto target_file =
+        get_effective_controller_config();
+
+    std::ifstream input(target_file);
+
+    if (!input.is_open()) {
+
+        LOG(ERROR)
+            << "Failed opening "
+            << target_file;
+
+        return ConfigUpdateResult::ERROR;
     }
 
-    std::vector<std::string> lines;
-    std::string line;
-    bool key_found = false;
-    bool in_controller_sec = false;
-    size_t insert_pos = std::string::npos;
-    
-    std::string target_key = "use_dataelements_vap_configs=";
-    std::string new_val = enable_templates ? "1" : "0";
+    constexpr char KEY[] =
+        "use_dataelements_vap_configs=";
 
-    while (std::getline(file_in, line)) {
+    std::string expected =
+        std::string(KEY) +
+        (enable_templates ? "1" : "0");
+
+    std::vector<std::string> lines;
+
+    bool in_controller_section = false;
+
+    bool found = false;
+
+    size_t insert_pos =
+        std::string::npos;
+
+    std::string line;
+
+    while (std::getline(input, line)) {
+
         std::string trimmed = line;
+
         trim_whitespace(trimmed);
 
         if (trimmed == "[controller]") {
-            in_controller_sec = true;
-        } else if (!trimmed.empty() && trimmed[0] == '[') {
-            if (in_controller_sec) {
-                insert_pos = lines.size();
-                in_controller_sec = false;
+
+            in_controller_section = true;
+        }
+        else if (!trimmed.empty() &&
+                 trimmed[0] == '[') {
+
+            if (in_controller_section) {
+
+                insert_pos =
+                    lines.size();
+
+                in_controller_section =
+                    false;
             }
         }
 
-        if (in_controller_sec && trimmed.compare(0, target_key.size(), target_key) == 0) {
-            line = target_key + new_val;
-            key_found = true;
+        if (in_controller_section &&
+            trimmed.compare(
+                0,
+                strlen(KEY),
+                KEY) == 0) {
+
+            found = true;
+
+            if (trimmed == expected) {
+
+                LOG(DEBUG)
+                    << "Controller config already contains "
+                    << expected;
+
+                input.close();
+
+                return ConfigUpdateResult::ALREADY_SET;
+            }
+
+            LOG(INFO)
+                << "Replacing controller config entry: "
+                << trimmed
+                << " -> "
+                << expected;
+
+            line = expected;
         }
+
         lines.push_back(line);
     }
-    file_in.close();
 
-    if (in_controller_sec && insert_pos == std::string::npos) {
+    input.close();
+
+    if (in_controller_section &&
+        insert_pos == std::string::npos) {
+
         insert_pos = lines.size();
     }
 
-    if (!key_found) {
+    if (!found) {
+
+        LOG(INFO)
+            << "Appending "
+            << expected;
+
         if (insert_pos != std::string::npos) {
-            lines.insert(lines.begin() + insert_pos, target_key + new_val);
-        } else {
+
+            lines.insert(
+                lines.begin() + insert_pos,
+                expected);
+        }
+        else {
+
             lines.push_back("[controller]");
-            lines.push_back(target_key + new_val);
+
+            lines.push_back(expected);
         }
     }
 
-    std::string tmp_file = target_file + ".tmp";
-    std::ofstream file_out(tmp_file, std::ios::trunc);
-    if (!file_out.is_open()) {
-        LOG(ERROR) << "Failed to open tmp file: " << tmp_file;
-        return false;
+    auto tmp =
+        target_file + ".tmp";
+
+    std::ofstream output(
+        tmp,
+        std::ios::trunc);
+
+    if (!output.is_open()) {
+
+        LOG(ERROR)
+            << "Failed opening temporary file "
+            << tmp;
+
+        return ConfigUpdateResult::ERROR;
     }
 
-    for (const auto& l : lines) {
-        file_out << l << "\n";
-    }
-    
-    // Flush to OS buffers before the atomic rename
-    file_out.flush();
-    file_out.close();
+    for (auto &l : lines) {
 
-    if (std::rename(tmp_file.c_str(), target_file.c_str()) != 0) {
-        LOG(ERROR) << "Failed to rename tmp config file";
-        std::remove(tmp_file.c_str());
-        return false;
+        output << l << "\n";
     }
 
-    LOG(INFO) << "Persisted " << target_key << new_val << " into " << target_file;
-    return true;
+    output.flush();
+
+    output.close();
+
+    if (std::rename(
+            tmp.c_str(),
+            target_file.c_str()) != 0) {
+
+        LOG(ERROR)
+            << "Atomic rename failed";
+
+        std::remove(tmp.c_str());
+
+        return ConfigUpdateResult::ERROR;
+    }
+
+    LOG(INFO)
+        << "Persisted "
+        << expected
+        << " into "
+        << target_file;
+
+    return ConfigUpdateResult::UPDATED;
 }
 
-static void event_use_dataelements_vap_config_changed(
-    const char *const sig_name,
-    const amxc_var_t *const data,
-    void *const priv)
+static void
+event_use_dataelements_vap_config_changed(
+        const char *const sig_name,
+        const amxc_var_t *const data,
+        void *const priv)
 {
-    // Ignore events fired during startup synchronization
-    if (!g_templates_dm_initialized) {
+    if (!is_templates_dm_initialized()) {
+
+        LOG(DEBUG)
+            << "Ignoring startup event";
+
         return;
     }
 
-    auto *network = amxd_dm_signal_get_object(beerocks::nbapi::Amxrt::getDatamodel(), data);
-    if (!network) {  
-        LOG(ERROR) << "Failed to get DataElements.Network";  
-        return;  
-    }  
+    auto *network =
+        amxd_dm_signal_get_object(
 
-    bool enabled = get_param_bool(network, "UseDataElementsVapConfigs");  
+            beerocks::nbapi::Amxrt::
+            getDatamodel(),
 
-    /*
-     * Persist DM value into beerocks_controller.conf.
-     * Runtime behavior remains unchanged.
-     * Controller restart is required for the new configuration to take effect.
-     */
-    if (!update_master_config_file(enabled)) {
-        LOG(ERROR) << "Failed to apply template configuration change to controller config.";
+            data);
+
+    if (!network) {
+
+        LOG(ERROR)
+            << "Failed obtaining DataElements.Network";
+
         return;
     }
 
-    LOG(INFO) << "Configuration updated. Restart the prplMesh controller to apply changes.";
+    bool enabled =
+        amxd_object_get_bool(
+
+            network,
+
+            "UseDataElementsVapConfigs",
+
+            nullptr);
+
+    LOG(INFO)
+        << "UseDataElementsVapConfigs changed -> "
+        << enabled;
+
+    auto result =
+        update_master_config_file(
+            enabled);
+
+    switch (result) {
+
+    case ConfigUpdateResult::UPDATED:
+
+        LOG(INFO)
+            << "Configuration persisted successfully";
+
+        LOG(INFO)
+            << "Restart controller to apply changes";
+
+        break;
+
+    case ConfigUpdateResult::ALREADY_SET:
+
+        LOG(DEBUG)
+            << "Configuration already matches";
+
+        break;
+
+    default:
+
+        LOG(ERROR)
+            << "Configuration persistence failed";
+
+        break;
+    }
 }
 
-// Near the top of the file
-extern bool g_templates_dm_initialized;
+son::db master_db(
+        master_conf,
+        logger,
+        tlvf::mac_from_string(
+            bridge_info.mac),
+        amb_dm_obj);
 
-// ... inside main(), around line 250, after amb_dm_obj->init and DB setup:
+#ifdef ENABLE_NBAPI
 
-// 1. Sync the DM from the physical config file to prevent split-brain
-bool use_templates = (master_conf.use_dataelements_vap_configs == "1");
-if (!amb_dm_obj->set(DATAELEMENTS_ROOT_DM ".Network", "UseDataElementsVapConfigs", use_templates)) {
-    LOG(ERROR) << "Failed to sync UseDataElementsVapConfigs to Data Model";
+prplmesh::controller::
+actions::g_database =
+    &master_db;
+
+#endif
+
+bool use_templates =
+    master_db.config
+        .use_dataelements_vap_configs;
+
+LOG(INFO)
+    << "Templates source mode: "
+    << (use_templates
+        ? "Templates"
+        : "Device.WiFi");
+
+if (!amb_dm_obj->set(
+
+        DATAELEMENTS_ROOT_DM
+        ".Network",
+
+        "UseDataElementsVapConfigs",
+
+        use_templates)) {
+
+    LOG(ERROR)
+
+        << "Failed syncing "
+
+        << "UseDataElementsVapConfigs";
+
+}
+else {
+
+    LOG(INFO)
+
+        << "DM synchronized with "
+
+        << "beerocks_controller.conf";
+
 }
 
-// 2. Unlock the event handler for runtime changes
-g_templates_dm_initialized = true;
+set_templates_dm_initialized(true);
 
-// ... controller.start() continues below ...
+LOG(INFO)
+
+    << "Templates DM initialization completed";
+
+on event "dm:object-changed"
+call event_use_dataelements_vap_config_changed
+
+filter
+'object matches
+"Device\.WiFi\.DataElements\.Network\."
+&& contains("parameters.UseDataElementsVapConfigs")';
+
+beerocks_controller.conf
+
+↓
+
+read_master_config_file()
+
+↓
+
+master_conf
+
+↓
+
+master_db.config
+
+↓
+
+ambiorix.set()
+
+↓
+
+DM updated
+
+↓
+
+event fires
+
+↓
+
+callback sees
+g_templates_dm_initialized=false
+
+↓
+
+ignored
+
+↓
+
+set_templates_dm_initialized(true)
+
+↓
+
+runtime enabled
+
+user change
+
+DM parameter
+
+↓
+
+event callback
+
+↓
+
+update_master_config_file()
+
+↓
+
+atomic rename
+
+↓
+
+INFO log
+
+↓
+
+manual restart
+
+↓
+
+startup rereads file
+
+↓
+
+new mode active
+
