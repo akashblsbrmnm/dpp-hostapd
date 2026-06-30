@@ -1,300 +1,157 @@
-%populate {
-
-    object '@TEMPLATES_ROOT_DM@' {
-
-        object 'Network' {
-            parameter 'Enable' = false;
-            parameter 'TopologyFlag' = "Root,Repeater";
-            parameter 'IEEE1905ALID' = "";
-            parameter 'PrimarySSCTemplateReference' =
-                "Device.WiFi.Templates.SSCTemplate.2";
-        }
-
-        /* --------------------------------------- */
-        /* Radio 1 : 2.4GHz                        */
-        /* --------------------------------------- */
-
-        object RadioTemplate {
-
-            instance add ("radio-template-2g") {
-
-                parameter 'RadioTemplateID' =
-                    "radio-template-001";
-
-                parameter 'Enable' = true;
-
-                parameter 'Priority' = 200;
-
-                parameter 'BandFlag' = "2.4";
-
-                parameter 'TransmitPowerLimit' = 20;
-
-                parameter 'SupportedGenerationFlag' = "";
-
-                parameter 'OperatingGeneration' = "";
-
-                parameter 'OpClassFlag' = "";
-            }
-
-            /* ----------------------------------- */
-            /* Radio 2 : 5GHz                      */
-            /* ----------------------------------- */
-
-            instance add ("radio-template-5g") {
-
-                parameter 'RadioTemplateID' =
-                    "radio-template-002";
-
-                parameter 'Enable' = true;
-
-                parameter 'Priority' = 200;
-
-                parameter 'BandFlag' = "5";
-
-                parameter 'TransmitPowerLimit' = 20;
-
-                parameter 'SupportedGenerationFlag' = "";
-
-                parameter 'OperatingGeneration' = "";
-
-                parameter 'OpClassFlag' = "";
-            }
-        }
-
-        /* --------------------------------------- */
-        /* SSC                                     */
-        /* --------------------------------------- */
-
-        object SSCTemplate {
-
-            instance add ("ssc-template-bh") {
-
-                parameter 'SSCTemplateID' =
-                    "ssc-template-001";
-
-                parameter 'SSCEnable' = true;
-
-                parameter 'VID' = 0;
-
-                parameter 'HaulType' =
-                    "Backhaul";
-            }
-
-            instance add ("ssc-template-fh") {
-
-                parameter 'SSCTemplateID' =
-                    "ssc-template-002";
-
-                parameter 'SSCEnable' = true;
-
-                parameter 'VID' = 0;
-
-                parameter 'HaulType' =
-                    "Fronthaul";
-            }
-        }
-
-        /* --------------------------------------- */
-        /* Security Templates                      */
-        /* --------------------------------------- */
-
-        object SecurityTemplate {
-
-            /* SAE */
-
-            instance add ("sec-template-sae") {
-
-                parameter 'SecurityTemplateID' =
-                    "sec-template-001";
-
-                parameter 'Enable' = true;
-
-                parameter 'Priority' = 220;
-
-                parameter 'RSNOSupportFlag' =
-                    "null";
-
-                object RSNE {
-
-                    parameter 'GroupDataCipherSuite' =
-                        "ccmp";
-
-                    parameter 'PairwiseCipherSuite' =
-                        "ccmp";
-
-                    parameter 'AKMSuite' =
-                        "sae";
-
-                    parameter 'MFP' =
-                        "Required";
-                }
-            }
-
-            /* Transition */
-
-            instance add ("sec-template-transition") {
-
-                parameter 'SecurityTemplateID' =
-                    "sec-template-002";
-
-                parameter 'Enable' = true;
-
-                parameter 'Priority' = 210;
-
-                parameter 'RSNOSupportFlag' =
-                    "null";
-
-                object RSNE {
-
-                    parameter 'GroupDataCipherSuite' =
-                        "ccmp";
-
-                    parameter 'PairwiseCipherSuite' =
-                        "ccmp";
-
-                    parameter 'AKMSuite' =
-                        "psk,sae";
-
-                    parameter 'MFP' =
-                        "Required";
-                }
-            }
-        }
-
-        /* --------------------------------------- */
-        /* Security Groups                         */
-        /* --------------------------------------- */
-
-        object SecurityGroup {
-
-            instance add ("security-group-bh") {
-
-                parameter 'SecurityGroupID' =
-                    "sg-template-001";
-
-                parameter 'SecurityTemplateReferences' =
-                    "Device.WiFi.Templates.SecurityTemplate.1";
-            }
-
-            instance add ("security-group-fh") {
-
-                parameter 'SecurityGroupID' =
-                    "sg-template-002";
-
-                parameter 'SecurityTemplateReferences' =
-                    "Device.WiFi.Templates.SecurityTemplate.2";
-            }
-        }
-
-        /* --------------------------------------- */
-        /* BSS Templates                           */
-        /* --------------------------------------- */
-
-        object BSSTemplate {
-
-            /* Backhaul */
-
-            instance add ("bss-template-bh") {
-
-                parameter 'BSSTemplateID' =
-                    "bss-template-001";
-
-                parameter 'Enable' = false;
-
-                parameter 'Priority' = 240;
-
-                parameter 'SSID' =
-                    "TATA-BH";
-
-                parameter 'KeyPassphrase' =
-                    "bh5gsae123";
-
-                parameter 'AdvertisementEnable' =
-                    true;
-
-                parameter 'TopologyFlag' =
-                    "Root,Repeater";
-
-                parameter 'X_PRPLWARE-COM_VapType' =
-                    "backhaul";
-
-                parameter 'RadioTemplateReference' =
-                    "Device.WiFi.Templates.RadioTemplate.2";
-
-                parameter 'SSCTemplateReference' =
-                    "Device.WiFi.Templates.SSCTemplate.1";
-
-                parameter 'SecurityGroupReference' =
-                    "Device.WiFi.Templates.SecurityGroup.1";
-            }
-
-            /* Fronthaul */
-
-            instance add ("bss-template-fh") {
-
-                parameter 'BSSTemplateID' =
-                    "bss-template-002";
-
-                parameter 'Enable' = false;
-
-                parameter 'Priority' = 230;
-
-                parameter 'SSID' =
-                    "TATA";
-
-                parameter 'KeyPassphrase' =
-                    "tatawifi123";
-
-                parameter 'AdvertisementEnable' =
-                    true;
-
-                parameter 'TopologyFlag' =
-                    "Root,Repeater";
-
-                parameter 'X_PRPLWARE-COM_VapType' =
-                    "home";
-
-                parameter 'RadioTemplateReference' =
-                    "Device.WiFi.Templates.RadioTemplate.2";
-
-                parameter 'SSCTemplateReference' =
-                    "Device.WiFi.Templates.SSCTemplate.2";
-
-                parameter 'SecurityGroupReference' =
-                    "Device.WiFi.Templates.SecurityGroup.2";
-            }
-        }
-    }
+#include <fstream>
+#include <vector>
+#include <cstdio>
+#include <unistd.h>
+#include "bcl/beerocks_os_utils.h"
+
+// Guard to prevent boot-looping the event handler
+bool g_templates_dm_initialized = false;
+
+// Helper to handle whitespace in INI sections
+static inline void trim_whitespace(std::string &s) {
+    s.erase(s.find_last_not_of(" \t\r\n") + 1);
+    s.erase(0, s.find_first_not_of(" \t\r\n"));
 }
 
-Device.WiFi.Templates
+static std::string get_effective_controller_config() {
+    std::string fallback = mapf::utils::get_install_path() + "config/beerocks_controller.conf";
 
-Network
+#ifdef BEEROCKS_RDKB
+    std::string primary = "/nvram/beerocks_controller.conf";
+#else
+    std::string primary = "./beerocks_controller.conf";
+#endif
 
-RadioTemplate
- ├── radio-template-2g
- └── radio-template-5g
+    constexpr char TMP_CONF[] = "/tmp/beerocks_controller.conf";
+    if (access(TMP_CONF, F_OK) == 0) {
+        return TMP_CONF;
+    }
+    if (access(primary.c_str(), F_OK) == 0) {
+        return primary;
+    }
+    return fallback;
+}
 
-SSCTemplate
- ├── ssc-template-bh
- └── ssc-template-fh
+static bool update_master_config_file(bool enable_templates) {
+    std::string target_file = get_effective_controller_config();
+    std::ifstream file_in(target_file);
+    
+    if (!file_in.is_open()) {
+        LOG(ERROR) << "Failed to open config file: " << target_file;
+        return false;
+    }
 
-SecurityTemplate
- ├── sec-template-sae
- └── sec-template-transition
+    std::vector<std::string> lines;
+    std::string line;
+    bool key_found = false;
+    bool in_controller_sec = false;
+    size_t insert_pos = std::string::npos;
+    
+    std::string target_key = "use_dataelements_vap_configs=";
+    std::string new_val = enable_templates ? "1" : "0";
 
-SecurityGroup
- ├── sg-template-001
- └── sg-template-002
+    while (std::getline(file_in, line)) {
+        std::string trimmed = line;
+        trim_whitespace(trimmed);
 
-BSSTemplate
- ├── bss-template-bh
- └── bss-template-fh
+        if (trimmed == "[controller]") {
+            in_controller_sec = true;
+        } else if (!trimmed.empty() && trimmed[0] == '[') {
+            if (in_controller_sec) {
+                insert_pos = lines.size();
+                in_controller_sec = false;
+            }
+        }
 
+        if (in_controller_sec && trimmed.compare(0, target_key.size(), target_key) == 0) {
+            line = target_key + new_val;
+            key_found = true;
+        }
+        lines.push_back(line);
+    }
+    file_in.close();
 
-ba-cli 'Device.WiFi.Templates.BSSTemplate.1.Enable=true'
-ba-cli 'Device.WiFi.Templates.BSSTemplate.2.Enable=true'
+    if (in_controller_sec && insert_pos == std::string::npos) {
+        insert_pos = lines.size();
+    }
 
-sleep 5
+    if (!key_found) {
+        if (insert_pos != std::string::npos) {
+            lines.insert(lines.begin() + insert_pos, target_key + new_val);
+        } else {
+            lines.push_back("[controller]");
+            lines.push_back(target_key + new_val);
+        }
+    }
 
-ba-cli 'Device.WiFi.Templates.Network.Enable=true'
+    std::string tmp_file = target_file + ".tmp";
+    std::ofstream file_out(tmp_file, std::ios::trunc);
+    if (!file_out.is_open()) {
+        LOG(ERROR) << "Failed to open tmp file: " << tmp_file;
+        return false;
+    }
+
+    for (const auto& l : lines) {
+        file_out << l << "\n";
+    }
+    
+    // Flush to OS buffers before the atomic rename
+    file_out.flush();
+    file_out.close();
+
+    if (std::rename(tmp_file.c_str(), target_file.c_str()) != 0) {
+        LOG(ERROR) << "Failed to rename tmp config file";
+        std::remove(tmp_file.c_str());
+        return false;
+    }
+
+    LOG(INFO) << "Persisted " << target_key << new_val << " into " << target_file;
+    return true;
+}
+
+static void event_use_dataelements_vap_config_changed(
+    const char *const sig_name,
+    const amxc_var_t *const data,
+    void *const priv)
+{
+    // Ignore events fired during startup synchronization
+    if (!g_templates_dm_initialized) {
+        return;
+    }
+
+    auto *network = amxd_dm_signal_get_object(beerocks::nbapi::Amxrt::getDatamodel(), data);
+    if (!network) {  
+        LOG(ERROR) << "Failed to get DataElements.Network";  
+        return;  
+    }  
+
+    bool enabled = get_param_bool(network, "UseDataElementsVapConfigs");  
+
+    /*
+     * Persist DM value into beerocks_controller.conf.
+     * Runtime behavior remains unchanged.
+     * Controller restart is required for the new configuration to take effect.
+     */
+    if (!update_master_config_file(enabled)) {
+        LOG(ERROR) << "Failed to apply template configuration change to controller config.";
+        return;
+    }
+
+    LOG(INFO) << "Configuration updated. Restart the prplMesh controller to apply changes.";
+}
+
+// Near the top of the file
+extern bool g_templates_dm_initialized;
+
+// ... inside main(), around line 250, after amb_dm_obj->init and DB setup:
+
+// 1. Sync the DM from the physical config file to prevent split-brain
+bool use_templates = (master_conf.use_dataelements_vap_configs == "1");
+if (!amb_dm_obj->set(DATAELEMENTS_ROOT_DM ".Network", "UseDataElementsVapConfigs", use_templates)) {
+    LOG(ERROR) << "Failed to sync UseDataElementsVapConfigs to Data Model";
+}
+
+// 2. Unlock the event handler for runtime changes
+g_templates_dm_initialized = true;
+
+// ... controller.start() continues below ...
